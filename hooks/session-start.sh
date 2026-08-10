@@ -52,8 +52,26 @@ if command -v tailscaled >/dev/null 2>&1; then
 	fi
 fi
 
+# --- profile detection -----------------------------------------------------
+# The catalog is a single repo checkout now, so the profile is auto-detected
+# from on-disk markers. CLAUDE_ENV_PROFILE, if set non-empty, overrides
+# detection outright — an escape hatch for unusual repos (e.g. a fork laid
+# out differently, or local testing) where the markers below don't apply.
+PROFILE="${CLAUDE_ENV_PROFILE:-}"
+if [ -n "$PROFILE" ]; then
+	PROFILE_LINE="Profile: ${PROFILE} (override via CLAUDE_ENV_PROFILE)"
+elif [ -f talos/talconfig.yaml ]; then
+	PROFILE="talos"
+	PROFILE_LINE="Profile: talos (auto-detected from talos/talconfig.yaml)"
+elif [ -f .env.cloud ]; then
+	PROFILE="opentofu"
+	PROFILE_LINE="Profile: opentofu (auto-detected from .env.cloud)"
+else
+	PROFILE_LINE="Profile: none"
+fi
+
 # --- per-profile secret-derived state -------------------------------------
-case "${CLAUDE_ENV_PROFILE:-}" in
+case "$PROFILE" in
 talos)
 	if [ -n "${INTERNAL_DOMAIN_RE:-}" ] && [ ! -f .mise.local.toml ]; then
 		printf '[env]\nINTERNAL_DOMAIN_RE = '\''%s'\''\n' "${INTERNAL_DOMAIN_RE}" >.mise.local.toml
@@ -106,3 +124,5 @@ Cloud session networking (from claude-cloud-env session-start hook):
 - Secrets: op CLI is authenticated via OP_SERVICE_ACCOUNT_TOKEN (read-only,
   scoped vaults). Use op run / op read. Never print secret values.
 CTX
+
+printf '%s\n' "$PROFILE_LINE"

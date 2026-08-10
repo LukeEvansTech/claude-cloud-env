@@ -19,10 +19,13 @@
 	# detection, and restrict PATH so tailscaled/op aren't found even if
 	# installed on the host — the tailnet block and the
 	# OP_SERVICE_ACCOUNT_TOKEN-gated talos actions must stay inert for this
-	# test to be safe to run anywhere.
+	# test to be safe to run anywhere. CCENV_SKIP_INSTALL=1 is test-only
+	# (documented in the hook itself): the restricted PATH above makes
+	# `command -v op` fail on purpose, which would otherwise trigger the
+	# op self-heal's real network download during tests.
 	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
 	cd "$BATS_TEST_TMPDIR"
-	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true run bash "$script"
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"Profile: none"* ]]
 }
@@ -33,7 +36,7 @@
 	cd "$BATS_TEST_TMPDIR"
 	mkdir -p talos
 	: >talos/talconfig.yaml
-	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true run bash "$script"
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"Profile: talos"* ]]
 }

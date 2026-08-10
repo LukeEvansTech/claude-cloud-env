@@ -19,6 +19,44 @@ if [ "${CCENV_UPDATED:-}" != "1" ] && [ -w "$SELF" ]; then
 	fi
 fi
 
+# --- op self-heal -----------------------------------------------------------
+# Older snapshots' bootstrap.sh installed op via `mise use --global`, which
+# only reaches PATH through /etc/profile.d — invisible to this hook's
+# non-login shell (and to any subprocess resolving `op` via a bare PATH
+# lookup). Direct-install it the same way current bootstrap.sh does, so
+# already-built snapshots heal via this hook's self-update above without
+# waiting for a cache rebuild.
+# CCENV_SKIP_INSTALL=1 is test-only: it disables this block so the bats
+# suite (which restricts PATH so `command -v op` fails on purpose) never
+# triggers a real network download.
+if [ "${CCENV_SKIP_INSTALL:-}" != "1" ] && ! command -v op >/dev/null 2>&1 && [ ! -x /usr/local/bin/op ]; then
+	OP_VERSION="2.32.0"
+	OP_BIN_DIR=/usr/local/bin
+	if [ ! -w "$OP_BIN_DIR" ]; then
+		OP_BIN_DIR="$HOME/.local/bin"
+		install -d "$OP_BIN_DIR" 2>/dev/null
+		export PATH="$OP_BIN_DIR:$PATH"
+		log "op: /usr/local/bin not writable; self-healing to ${OP_BIN_DIR} instead."
+	fi
+	if curl -fsSL --max-time 15 "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_linux_amd64_v${OP_VERSION}.zip" \
+		-o /tmp/ccenv-op.zip 2>/dev/null; then
+		install -d /tmp/ccenv-op-install 2>/dev/null
+		if command -v unzip >/dev/null 2>&1; then
+			unzip -oq /tmp/ccenv-op.zip -d /tmp/ccenv-op-install op 2>/dev/null
+		elif command -v busybox >/dev/null 2>&1; then
+			busybox unzip -oq /tmp/ccenv-op.zip -d /tmp/ccenv-op-install op 2>/dev/null
+		fi
+		if [ -f /tmp/ccenv-op-install/op ] && install -m755 /tmp/ccenv-op-install/op "${OP_BIN_DIR}/op" 2>/dev/null; then
+			log "op: self-healed — installed ${OP_VERSION} to ${OP_BIN_DIR}/op."
+		else
+			log "op: self-heal install FAILED (no unzip/busybox, or install denied) — op unavailable this session."
+		fi
+		rm -rf /tmp/ccenv-op.zip /tmp/ccenv-op-install
+	else
+		log "op: self-heal download FAILED — op unavailable this session."
+	fi
+fi
+
 # --- tailnet join (ephemeral tagged node, userspace networking) -----------
 # The sandbox's no_proxy/NO_PROXY covers 100.64.0.0/10 and all RFC1918
 # ranges (Phase 0), so every tailnet-bound command below clears both —

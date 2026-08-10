@@ -3,7 +3,7 @@
 Operational scripts fetched by every [Claude Code cloud environment](https://code.claude.com)
 web-UI setup script. Public and secret-free by design: everything here lands in a
 filesystem snapshot that's cached and reused for about a week, so nothing that touches
-a credential belongs in this repo.
+a credential belongs in this repository.
 
 ## Two-phase rule
 
@@ -33,5 +33,5 @@ rebuild the next time an environment starts.
 ## Environment catalog
 
 The per-environment definitions (network access level, env vars, 1Password item
-references) are documented in the local claudecode docs repo, not here — this repo only
-holds the scripts they fetch.
+references) are documented in the local claudecode docs repository, not here — this
+repository only holds the scripts they fetch.

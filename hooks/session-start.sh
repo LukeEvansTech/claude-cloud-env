@@ -57,6 +57,29 @@ if [ "${CCENV_SKIP_INSTALL:-}" != "1" ] && ! command -v op >/dev/null 2>&1 && [ 
 	fi
 fi
 
+# Derive a DNS-label-safe tailnet hostname from the repo basename and the
+# session ID. Live evidence: `tailscale up` failed with `"claude-...-cse_01Xf"
+# is not a valid DNS label: contains invalid character '_'` — real session
+# IDs commonly contain '_' (e.g. cse_01Xf), which RFC 1123 DNS labels
+# forbid. Every input segment is character-filtered before assembly (the
+# SID takes a wider 12-char slice first so filtering doesn't shorten it to
+# nothing before the final cut to 8), and the assembled result is
+# re-sanitised as a whole — lowercased, doubled hyphens collapsed,
+# leading/trailing hyphens stripped, length-capped at 63 — since
+# concatenation alone can still produce an invalid edge (e.g. a trailing
+# '-' when the SID segment strips to nothing).
+ccenv_hostname() {
+	local repo_arg="${1:-}" sid_arg="${2:-}" repo_seg sid_seg hn
+	repo_seg="$(basename "$repo_arg" | tr -cd 'a-zA-Z0-9-' | cut -c1-20)"
+	sid_seg="$(printf '%s' "${sid_arg:0:12}" | tr -cd 'a-zA-Z0-9-' | cut -c1-8)"
+	hn="claude-${repo_seg}-${sid_seg}"
+	hn="$(printf '%s' "$hn" | tr '[:upper:]' '[:lower:]' | sed -E 's/-{2,}/-/g; s/^-+//; s/-+$//' | cut -c1-63)"
+	if [ -z "$hn" ] || [ "$hn" = "claude" ]; then
+		hn="claude-session"
+	fi
+	printf '%s' "$hn"
+}
+
 # --- tailnet join (ephemeral tagged node, userspace networking) -----------
 # The sandbox's no_proxy/NO_PROXY covers 100.64.0.0/10 and all RFC1918
 # ranges (Phase 0), so every tailnet-bound command below clears both —
@@ -74,7 +97,7 @@ if command -v tailscaled >/dev/null 2>&1; then
 		done
 	fi
 	if [ -n "${TS_OAUTH_CLIENT_SECRET:-}" ] && ! tailscale status >/dev/null 2>&1; then
-		HN="claude-$(basename "$(pwd)" | tr -cd 'a-zA-Z0-9-' | cut -c1-20)-${CLAUDE_CODE_REMOTE_SESSION_ID:0:8}"
+		HN="$(ccenv_hostname "$(pwd)" "${CLAUDE_CODE_REMOTE_SESSION_ID:-}")"
 		# --accept-routes: the cluster and all LAN devices sit behind subnet
 		# routers, not directly on the tailnet (Phase 0) — without this flag
 		# nothing infra-side is reachable even once joined.

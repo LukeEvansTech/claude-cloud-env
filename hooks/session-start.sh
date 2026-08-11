@@ -57,6 +57,35 @@ if [ "${CCENV_SKIP_INSTALL:-}" != "1" ] && ! command -v op >/dev/null 2>&1 && [ 
 	fi
 fi
 
+# --- GitHub token sanity check ----------------------------------------------
+# The cloud sandbox injects a placeholder GITHUB_TOKEN/GH_TOKEN (~14 chars)
+# that GitHub rejects with 401 "Bad credentials" on any authenticated call.
+# mise's aqua backend sends that token on both release lookups AND on
+# fetching signature/attestation data (cosign, SLSA, minisign, GitHub
+# Artifact Attestations), so every `mise exec`/`mise install` for a tool
+# that isn't already cached fails outright — including this hook's own
+# `mise exec -- just talos gen-config` below. Probe the token once: if it's
+# missing or bad, every mise invocation in this script gets prefixed with
+# GITHUB_TOKEN='' GH_TOKEN='' (falls back to anonymous GitHub API access,
+# ~60 req/h) and the aqua backend's signature/attestation verification gets
+# disabled (clearing the token alone still 401s there — GitHub's
+# attestations API needs *some* credential, unlike its releases API).
+# talos-cluster pins tool checksums via its committed mise.lock, so
+# artifact integrity is still enforced via the lockfile without live
+# attestation calls.
+ccenv_gh_token_ok() {
+	[ -n "${GITHUB_TOKEN:-}" ] || return 1
+	curl -fsS -m 8 -o /dev/null -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/rate_limit
+}
+
+# CCENV_SKIP_INSTALL=1 (test-only, see op self-heal above) short-circuits
+# this check too — ccenv_gh_token_ok is never actually called (so curl never
+# fires) when it's set, keeping the bats suite network-free.
+CCENV_MISE_ENV_PREFIX=""
+if [ "${CCENV_SKIP_INSTALL:-}" = "1" ] || ! ccenv_gh_token_ok; then
+	CCENV_MISE_ENV_PREFIX="GITHUB_TOKEN= GH_TOKEN= MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false"
+fi
+
 # Derive a DNS-label-safe tailnet hostname from the repo basename and the
 # session ID. Live evidence: `tailscale up` failed with `"claude-...-cse_01Xf"
 # is not a valid DNS label: contains invalid character '_'` — real session
@@ -138,22 +167,58 @@ talos)
 		printf '[env]\nINTERNAL_DOMAIN_RE = '\''%s'\''\n' "${INTERNAL_DOMAIN_RE}" >.mise.local.toml
 		log "Talos: .mise.local.toml written (identifier guard active)."
 	fi
+	# Persist the same GitHub-token workaround into .mise.local.toml so
+	# in-session `mise exec`/`mise run` invoked directly by Claude (not just
+	# this hook's own calls below) also skips the broken sandbox token.
+	# GITHUB_TOKEN/GH_TOKEN belong under [env] (exported to subprocesses);
+	# the aqua.* verify toggles must go under [settings] instead — mise
+	# reads its own settings from real process env vars or a [settings]
+	# table, never from a project's [env] table (verified empirically: an
+	# [env]-table MISE_AQUA_* key has no effect on `mise settings get`, a
+	# [settings]-table one does).
+	if [ -n "$CCENV_MISE_ENV_PREFIX" ] && { [ ! -f .mise.local.toml ] || ! grep -q '^GITHUB_TOKEN' .mise.local.toml; }; then
+		[ -f .mise.local.toml ] || printf '[env]\n' >.mise.local.toml
+		printf 'GITHUB_TOKEN = ""\nGH_TOKEN = ""\n\n[settings]\naqua.cosign = false\naqua.slsa = false\naqua.minisign = false\naqua.github_attestations = false\n' >>.mise.local.toml
+		log "Talos: cleared placeholder GITHUB_TOKEN/GH_TOKEN and disabled aqua signature/attestation verification in .mise.local.toml (sandbox token 401s; mise.lock checksums still enforce integrity)."
+	fi
+	if [ -f .mise.local.toml ]; then
+		# Hook-written config is untrusted until `mise trust` runs — mise
+		# refuses to parse an untrusted file, silently ignoring everything
+		# written above. This heals both the write above and any older
+		# snapshot that wrote this file without ever trusting it.
+		mise trust --quiet .mise.local.toml || mise trust --quiet || true
+	fi
 	if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && [ ! -f talos/clusterconfig/talosconfig ]; then
-		if mise exec -- just talos gen-config; then
+		# shellcheck disable=SC2086 # CCENV_MISE_ENV_PREFIX is an intentional word-split env-assignment list consumed by `env`.
+		if env $CCENV_MISE_ENV_PREFIX mise exec -- just talos gen-config; then
 			log "Talos: talosconfig generated from 1Password talsecret."
-			CP_NODE="$(mise exec -- yq -r '[.nodes[] | select(.controlPlane == true)][0].ipAddress' talos/talconfig.yaml 2>/dev/null || true)"
+			# shellcheck disable=SC2086
+			CP_NODE="$(env $CCENV_MISE_ENV_PREFIX mise exec -- yq -r '[.nodes[] | select(.controlPlane == true)][0].ipAddress' talos/talconfig.yaml 2>/dev/null || true)"
 			if [ -n "$CP_NODE" ] && [ "$CP_NODE" != "null" ]; then
 				# Phase 0 verdict (Task 2): talosctl's gRPC client honours only
 				# HTTPS_PROXY, not ALL_PROXY/SOCKS (SOCKS times out). Also clear
-				# no_proxy/NO_PROXY — see the tailnet-join comment above.
-				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 mise exec -- talosctl kubeconfig --nodes "$CP_NODE" --force; then
+				# no_proxy/NO_PROXY — see the tailnet-join comment above. The
+				# proxy vars are a literal prefix (parsed once, at write time);
+				# CCENV_MISE_ENV_PREFIX is a second, independent env prefix
+				# applied to the `env` call it wraps — both coexist fine since
+				# each is consumed by a different command in the pipeline.
+				# shellcheck disable=SC2086
+				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 env $CCENV_MISE_ENV_PREFIX mise exec -- talosctl kubeconfig --nodes "$CP_NODE" --force; then
 					log "Talos: kubeconfig fetched from ${CP_NODE}."
 				else
 					log "Talos: kubeconfig fetch FAILED — run manually: talosctl kubeconfig --nodes ${CP_NODE} --force"
 				fi
 			fi
 		else
-			log "Talos: gen-config FAILED — check OP_SERVICE_ACCOUNT_TOKEN and op connectivity."
+			# Distinguish op failure from mise/toolchain resolution failure —
+			# live evidence showed op was fine while this message blamed it;
+			# the real cause was mise's aqua lookups 401ing on the sandbox's
+			# placeholder GITHUB_TOKEN.
+			if op whoami >/dev/null 2>&1; then
+				log "Talos: gen-config FAILED — op is reachable and authorised, so this is a mise/toolchain resolution failure (check GitHub token / rate limits, not OP_SERVICE_ACCOUNT_TOKEN)."
+			else
+				log "Talos: gen-config FAILED — op is unreachable or unauthorised; check OP_SERVICE_ACCOUNT_TOKEN and op connectivity."
+			fi
 		fi
 	fi
 	;;
@@ -186,6 +251,11 @@ Cloud session networking (from claude-cloud-env session-start hook):
   (or tailscale ssh user@host). Check connectivity: tailscale status.
 - Secrets: op CLI is authenticated via OP_SERVICE_ACCOUNT_TOKEN (read-only,
   scoped vaults). Use op run / op read. Never print secret values.
+- GitHub: the sandbox's injected GITHUB_TOKEN/GH_TOKEN can be a placeholder
+  that GitHub rejects with 401 Bad credentials, breaking mise/gh/aqua-backed
+  tool installs. If a mise/gh/aqua-touching command 401s, retry it prefixed
+  with GITHUB_TOKEN='' GH_TOKEN='' — falls back to anonymous GitHub API
+  access, capped at ~60 requests/hour.
 CTX
 
 printf '%s\n' "$PROFILE_LINE"

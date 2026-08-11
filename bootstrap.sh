@@ -84,4 +84,34 @@ if [ -f mise.toml ] || [ -f .mise.toml ]; then
 	mise install --yes || log "WARN: mise install failed; sessions install lazily"
 fi
 
+# Pre-warm the talos-cluster toolchain into the shared mise data dir (same
+# shared-user assumption as the cwd warm-up above: bootstrap runs as root,
+# and tool installs land under root's mise data dir, which sessions reuse).
+# The env snapshot every session starts from is built by whichever repo's
+# setup script runs first — that's rarely talos-cluster, so its sessions
+# otherwise start with nothing cached and cold-install ~30 tools against
+# GitHub's 60/h anonymous rate limit (see hooks/session-start.sh's
+# GitHub-token comment for why the sandbox's injected token can't help:
+# it's a placeholder GitHub rejects with 401, so this clears it and skips
+# aqua signature/attestation verification here too — talos-cluster's
+# committed mise.lock still enforces checksum integrity on install).
+# Never fatal: every step falls back to a WARN so a failed pre-warm can't
+# break the snapshot build.
+if command -v mise >/dev/null 2>&1; then
+	log "pre-warming talos-cluster toolchain into shared mise cache"
+	if git clone --depth 1 https://github.com/LukeEvansTech/talos-cluster /opt/ccenv-warm/talos-cluster; then
+		# `&&`-chained explicitly rather than relying on `set -e`: inside a
+		# subshell that's itself the LHS of `||`, bash suspends errexit for
+		# the whole subshell (a documented gotcha), so a failed `mise trust`
+		# would otherwise NOT stop `mise install` from still running.
+		(
+			cd /opt/ccenv-warm/talos-cluster &&
+				GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false mise trust --quiet &&
+				GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false mise install --yes
+		) || log "WARN: talos toolchain pre-warm failed (non-fatal)"
+	else
+		log "WARN: talos toolchain pre-warm failed (non-fatal)"
+	fi
+fi
+
 log "bootstrap complete"

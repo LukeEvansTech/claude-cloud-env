@@ -41,6 +41,26 @@
 	[[ "$output" == *"Profile: talos"* ]]
 }
 
+# CCENV_SKIP_INSTALL=1 short-circuits ccenv_gh_token_ok (see the hook's
+# GitHub-token-sanity-check comment) the same way it gates the op self-heal
+# — no curl call ever fires — but it deterministically takes the
+# "token is bad" branch, so this exercises the real .mise.local.toml-writing
+# code path without any network access.
+@test "talos profile clears placeholder GitHub token and disables aqua verification in .mise.local.toml" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	mkdir -p talos
+	: >talos/talconfig.yaml
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	[ -f .mise.local.toml ]
+	grep -q '^GITHUB_TOKEN = ""$' .mise.local.toml
+	grep -q '^GH_TOKEN = ""$' .mise.local.toml
+	grep -q '^\[settings\]$' .mise.local.toml
+	grep -q '^aqua.github_attestations = false$' .mise.local.toml
+}
+
 # ccenv_hostname (tailnet hostname derivation) — the function is defined
 # unconditionally near the top of the script, so sourcing it under the same
 # safe harness as above (restricted PATH, CCENV_SKIP_INSTALL=1) defines it

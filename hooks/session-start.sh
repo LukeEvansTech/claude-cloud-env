@@ -60,22 +60,29 @@ fi
 # --- GitHub token sanity check ----------------------------------------------
 # The cloud sandbox injects a placeholder GITHUB_TOKEN/GH_TOKEN (~14 chars)
 # that GitHub rejects with 401 "Bad credentials" on any authenticated call.
-# mise's aqua backend sends that token on both release lookups AND on
-# fetching signature/attestation data (cosign, SLSA, minisign, GitHub
-# Artifact Attestations), so every `mise exec`/`mise install` for a tool
-# that isn't already cached fails outright — including this hook's own
-# `mise exec -- just talos gen-config` below. Probe the token once: if it's
-# missing or bad, every mise invocation in this script gets prefixed with
-# GITHUB_TOKEN='' GH_TOKEN='' (falls back to anonymous GitHub API access,
-# ~60 req/h) and the aqua backend's signature/attestation verification gets
-# disabled (clearing the token alone still 401s there — GitHub's
-# attestations API needs *some* credential, unlike its releases API).
-# talos-cluster pins tool checksums via its committed mise.lock, so
-# artifact integrity is still enforced via the lockfile without live
-# attestation calls.
+# mise sends that token on release lookups for BOTH the aqua backend and
+# the github backend (talos-cluster resolves two tools — flate, yayamlls —
+# via github:) AND on fetching each backend's signature/attestation data
+# (aqua: cosign, SLSA, minisign, GitHub Artifact Attestations; github: SLSA,
+# GitHub Artifact Attestations — confirmed as separate settings with no
+# cascade from aqua.*, e.g. `MISE_GITHUB_SLSA` doesn't touch `aqua.slsa`),
+# so every `mise exec`/`mise install` for a tool that isn't already cached
+# fails outright — including this hook's own `mise exec -- just talos
+# gen-config` below. Probe the token once: if it's missing or bad, every
+# mise invocation in this script gets prefixed with GITHUB_TOKEN=''
+# GH_TOKEN='' (falls back to anonymous GitHub API access, ~60 req/h) and
+# both backends' signature/attestation verification gets disabled
+# (clearing the token alone still 401s there — GitHub's attestations API
+# needs *some* credential, unlike its releases API; reproduced empirically
+# with a real bad token against a real, uncached github: tool). talos-
+# cluster pins tool checksums via its committed mise.lock, so artifact
+# integrity is still enforced via the lockfile without live attestation
+# calls.
 ccenv_gh_token_ok() {
 	[ -n "${GITHUB_TOKEN:-}" ] || return 1
-	curl -fsS -m 8 -o /dev/null -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/rate_limit
+	# No -S: a bad token 401ing here is the EXPECTED path, not an error —
+	# -S would print curl's own error text to stderr for that expected case.
+	curl -fs -m 8 -o /dev/null -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/rate_limit
 }
 
 # CCENV_SKIP_INSTALL=1 (test-only, see op self-heal above) short-circuits
@@ -83,7 +90,7 @@ ccenv_gh_token_ok() {
 # fires) when it's set, keeping the bats suite network-free.
 CCENV_MISE_ENV_PREFIX=""
 if [ "${CCENV_SKIP_INSTALL:-}" = "1" ] || ! ccenv_gh_token_ok; then
-	CCENV_MISE_ENV_PREFIX="GITHUB_TOKEN= GH_TOKEN= MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false"
+	CCENV_MISE_ENV_PREFIX="GITHUB_TOKEN= GH_TOKEN= MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false"
 fi
 
 # Derive a DNS-label-safe tailnet hostname from the repo basename and the
@@ -167,19 +174,25 @@ talos)
 		printf '[env]\nINTERNAL_DOMAIN_RE = '\''%s'\''\n' "${INTERNAL_DOMAIN_RE}" >.mise.local.toml
 		log "Talos: .mise.local.toml written (identifier guard active)."
 	fi
-	# Persist the same GitHub-token workaround into .mise.local.toml so
-	# in-session `mise exec`/`mise run` invoked directly by Claude (not just
-	# this hook's own calls below) also skips the broken sandbox token.
-	# GITHUB_TOKEN/GH_TOKEN belong under [env] (exported to subprocesses);
-	# the aqua.* verify toggles must go under [settings] instead — mise
-	# reads its own settings from real process env vars or a [settings]
-	# table, never from a project's [env] table (verified empirically: an
-	# [env]-table MISE_AQUA_* key has no effect on `mise settings get`, a
-	# [settings]-table one does).
+	# GITHUB_TOKEN/GH_TOKEN under [env] only reach processes mise SPAWNS as
+	# children (mise exec's target command, a `mise run` task's
+	# subprocesses — e.g. `gh`). They do NOT cover mise's OWN GitHub calls
+	# (release lookups, install resolution): mise reads the real process
+	# env for those before merging this file's [env] section, so a bare
+	# in-session `mise install`/`mise exec` still sees the sandbox's bad
+	# token unless the COMMAND ITSELF is prefixed with GITHUB_TOKEN=''
+	# GH_TOKEN='' (see the CTX bullet below — this is REQUIRED, not just
+	# helpful; reproduced empirically: a bad process-level token plus this
+	# exact [env]-cleared config still 401'd on a fresh github: install,
+	# and only clearing the token in the real process env fixed it). The
+	# aqua.*/github.* verify toggles below don't have this limitation —
+	# mise reads settings from [settings] (or real env vars), never through
+	# the [env]-merge path, so they DO apply to mise's own installs
+	# regardless of who's asking.
 	if [ -n "$CCENV_MISE_ENV_PREFIX" ] && { [ ! -f .mise.local.toml ] || ! grep -q '^GITHUB_TOKEN' .mise.local.toml; }; then
 		[ -f .mise.local.toml ] || printf '[env]\n' >.mise.local.toml
-		printf 'GITHUB_TOKEN = ""\nGH_TOKEN = ""\n\n[settings]\naqua.cosign = false\naqua.slsa = false\naqua.minisign = false\naqua.github_attestations = false\n' >>.mise.local.toml
-		log "Talos: cleared placeholder GITHUB_TOKEN/GH_TOKEN and disabled aqua signature/attestation verification in .mise.local.toml (sandbox token 401s; mise.lock checksums still enforce integrity)."
+		printf 'GITHUB_TOKEN = ""\nGH_TOKEN = ""\n\n[settings]\naqua.cosign = false\naqua.slsa = false\naqua.minisign = false\naqua.github_attestations = false\ngithub.slsa = false\ngithub.github_attestations = false\n' >>.mise.local.toml
+		log "Talos: .mise.local.toml updated — GITHUB_TOKEN/GH_TOKEN cleared for mise-spawned children only (does NOT cover mise's own installs; prefix those commands directly) and aqua/github signature+attestation verification disabled (sandbox token 401s; mise.lock checksums still enforce integrity)."
 	fi
 	if [ -f .mise.local.toml ]; then
 		# Hook-written config is untrusted until `mise trust` runs — mise
@@ -252,10 +265,14 @@ Cloud session networking (from claude-cloud-env session-start hook):
 - Secrets: op CLI is authenticated via OP_SERVICE_ACCOUNT_TOKEN (read-only,
   scoped vaults). Use op run / op read. Never print secret values.
 - GitHub: the sandbox's injected GITHUB_TOKEN/GH_TOKEN can be a placeholder
-  that GitHub rejects with 401 Bad credentials, breaking mise/gh/aqua-backed
-  tool installs. If a mise/gh/aqua-touching command 401s, retry it prefixed
-  with GITHUB_TOKEN='' GH_TOKEN='' — falls back to anonymous GitHub API
-  access, capped at ~60 requests/hour.
+  that GitHub rejects with 401 Bad credentials. This is REQUIRED, not just
+  helpful: prefix EVERY `mise install`/`mise exec`/gh/aqua-touching command
+  with GITHUB_TOKEN='' GH_TOKEN='' whenever it 401s — falls back to
+  anonymous GitHub API access, capped at ~60 requests/hour. The
+  .mise.local.toml this hook writes does NOT cover this for commands you
+  run yourself: it only clears the token for processes mise spawns as
+  children, not for mise's own installs, which read the real (bad) token
+  straight from the process environment.
 CTX
 
 printf '%s\n' "$PROFILE_LINE"

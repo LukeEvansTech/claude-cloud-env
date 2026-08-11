@@ -46,7 +46,7 @@
 # — no curl call ever fires — but it deterministically takes the
 # "token is bad" branch, so this exercises the real .mise.local.toml-writing
 # code path without any network access.
-@test "talos profile clears placeholder GitHub token and disables aqua verification in .mise.local.toml" {
+@test "talos profile clears placeholder GitHub token and disables aqua+github verification in .mise.local.toml" {
 	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
 	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
 	cd "$BATS_TEST_TMPDIR"
@@ -59,6 +59,8 @@
 	grep -q '^GH_TOKEN = ""$' .mise.local.toml
 	grep -q '^\[settings\]$' .mise.local.toml
 	grep -q '^aqua.github_attestations = false$' .mise.local.toml
+	grep -q '^github.slsa = false$' .mise.local.toml
+	grep -q '^github.github_attestations = false$' .mise.local.toml
 }
 
 # ccenv_hostname (tailnet hostname derivation) — the function is defined

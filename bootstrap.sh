@@ -93,24 +93,40 @@ fi
 # GitHub's 60/h anonymous rate limit (see hooks/session-start.sh's
 # GitHub-token comment for why the sandbox's injected token can't help:
 # it's a placeholder GitHub rejects with 401, so this clears it and skips
-# aqua signature/attestation verification here too — talos-cluster's
-# committed mise.lock still enforces checksum integrity on install).
-# Never fatal: every step falls back to a WARN so a failed pre-warm can't
-# break the snapshot build.
+# aqua AND github backend signature/attestation verification here too —
+# talos-cluster resolves two tools via github: as well as aqua:, and the
+# two backends' verify settings are separate with no cascade between them
+# — talos-cluster's committed mise.lock still enforces checksum integrity
+# on install). Never fatal: every step falls back to a WARN so a failed
+# pre-warm can't break the snapshot build.
 if command -v mise >/dev/null 2>&1; then
 	log "pre-warming talos-cluster toolchain into shared mise cache"
-	if git clone --depth 1 https://github.com/LukeEvansTech/talos-cluster /opt/ccenv-warm/talos-cluster; then
+	# Idempotent: a re-run (e.g. a cache-rebuild retry) with the checkout
+	# already present skips straight to trust+install instead of
+	# re-cloning. GIT_TERMINAL_PROMPT=0 stops git hanging on a credential
+	# prompt in this non-interactive script; `-c credential.helper=`
+	# disables any inherited credential helper for the clone, and
+	# GITHUB_TOKEN/GH_TOKEN are cleared too — the sandbox's placeholder
+	# token can 401 even a public, unauthenticated clone if a helper or
+	# these vars feed it to git, silently voiding the pre-warm.
+	CLONE_OK=0
+	if [ -d /opt/ccenv-warm/talos-cluster ]; then
+		CLONE_OK=1
+	elif GIT_TERMINAL_PROMPT=0 GITHUB_TOKEN='' GH_TOKEN='' git clone -c credential.helper= --depth 1 https://github.com/LukeEvansTech/talos-cluster /opt/ccenv-warm/talos-cluster; then
+		CLONE_OK=1
+	else
+		log "WARN: talos toolchain pre-warm failed (non-fatal)"
+	fi
+	if [ "$CLONE_OK" = "1" ]; then
 		# `&&`-chained explicitly rather than relying on `set -e`: inside a
 		# subshell that's itself the LHS of `||`, bash suspends errexit for
 		# the whole subshell (a documented gotcha), so a failed `mise trust`
 		# would otherwise NOT stop `mise install` from still running.
 		(
 			cd /opt/ccenv-warm/talos-cluster &&
-				GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false mise trust --quiet &&
-				GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false mise install --yes
+				GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false mise trust --quiet &&
+				GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false mise install --yes
 		) || log "WARN: talos toolchain pre-warm failed (non-fatal)"
-	else
-		log "WARN: talos toolchain pre-warm failed (non-fatal)"
 	fi
 fi
 

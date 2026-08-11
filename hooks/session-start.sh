@@ -61,7 +61,7 @@ fi
 # The cloud sandbox injects a placeholder GITHUB_TOKEN/GH_TOKEN (~14 chars)
 # that GitHub rejects with 401 "Bad credentials" on any authenticated call.
 # mise sends that token on release lookups for BOTH the aqua backend and
-# the github backend (talos-cluster resolves two tools — flate, yayamlls —
+# the github backend (talos-cluster resolves two tools — flate, yayamlls — # codespell:ignore flate
 # via github:) AND on fetching each backend's signature/attestation data
 # (aqua: cosign, SLSA, minisign, GitHub Artifact Attestations; github: SLSA,
 # GitHub Artifact Attestations — confirmed as separate settings with no

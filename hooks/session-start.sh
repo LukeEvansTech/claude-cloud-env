@@ -146,7 +146,7 @@ talos)
 				# Phase 0 verdict (Task 2): talosctl's gRPC client honours only
 				# HTTPS_PROXY, not ALL_PROXY/SOCKS (SOCKS times out). Also clear
 				# no_proxy/NO_PROXY — see the tailnet-join comment above.
-				if no_proxy='' NO_PROXY='' HTTPS_PROXY=http://localhost:1055 mise exec -- talosctl kubeconfig --nodes "$CP_NODE" --force; then
+				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 mise exec -- talosctl kubeconfig --nodes "$CP_NODE" --force; then
 					log "Talos: kubeconfig fetched from ${CP_NODE}."
 				else
 					log "Talos: kubeconfig fetch FAILED — run manually: talosctl kubeconfig --nodes ${CP_NODE} --force"
@@ -172,9 +172,11 @@ Cloud session networking (from claude-cloud-env session-start hook):
   routes for your subnet-routed LANs are accepted at join (--accept-routes).
 - The sandbox's own no_proxy/NO_PROXY covers 100.64.0.0/10 and all RFC1918
   ranges, which makes proxy-honouring tools bypass localhost:1055 and dial
-  direct (no route) for exactly the hosts you need. Prefix EVERY
-  tailnet-bound command with:
-    no_proxy='' NO_PROXY='' HTTPS_PROXY=http://localhost:1055
+  direct (no route) for exactly the hosts you need. The sandbox also
+  pre-exports a lowercase http_proxy/https_proxy (its own agent proxy),
+  which many tools — curl included — prefer over the uppercase form, so
+  both cases must be overridden. Prefix EVERY tailnet-bound command with:
+    no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055
   This one prefix works for curl, kubectl, and talosctl. A SOCKS5 proxy is
   also up on the same port, but talosctl's gRPC client ignores
   ALL_PROXY/SOCKS and times out — always use the HTTPS_PROXY form above.

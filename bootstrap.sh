@@ -130,4 +130,26 @@ if command -v mise >/dev/null 2>&1; then
 	fi
 fi
 
+# Pre-warm the terraform toolchain (opentofu, tflint) into the shared mise
+# data dir, same rationale as the talos-cluster warm above: a live cloud
+# session on a terraform repo found api.github.com proxy-gatekept (403) at
+# SESSION time, so mise couldn't self-install these tools there — but
+# snapshot-BUILD time (here) reaches the GitHub API fine. Pinned to
+# 1.12.5/0.64.0, what the day-one terraform repos (terraform-nextdns,
+# terraform-tailscale) declare in mise.toml. Other terraform repos pin
+# slightly different versions (e.g. terraform-github: opentofu 1.12.3,
+# tflint 0.63.1) and will cold-install those on first use — deliberate,
+# only the day-one pins are warmed here. `mise install TOOL@VERSION` (no
+# config file) installs straight into the shared data dir, unlike the
+# trust+install pair above which reads a checked-out mise.toml. Same
+# env-var pattern as the talos warm: clears GITHUB_TOKEN/GH_TOKEN (the
+# sandbox's placeholder token 401s even unauthenticated requests) and
+# disables aqua/github backend signature verification. Never fatal: each
+# install falls back to a WARN.
+if command -v mise >/dev/null 2>&1; then
+	log "pre-warming terraform toolchain (opentofu, tflint) into shared mise cache"
+	GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false mise install --yes opentofu@1.12.5 || log "WARN: opentofu pre-warm failed (non-fatal)"
+	GITHUB_TOKEN='' GH_TOKEN='' MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false mise install --yes tflint@0.64.0 || log "WARN: tflint pre-warm failed (non-fatal)"
+fi
+
 log "bootstrap complete"

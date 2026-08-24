@@ -149,6 +149,26 @@ if command -v tailscaled >/dev/null 2>&1; then
 	fi
 fi
 
+# --- git identity ----------------------------------------------------------
+# The cloud harness commits as `Claude <noreply@anthropic.com>`, so every
+# squash-merge lands on GitHub with Claude as the author and GitHub appends a
+# `Co-authored-by: Claude` trailer. Author cloud commits as the account owner
+# instead — the GitHub noreply address attributes to the account without
+# exposing a mailbox. GIT_AUTHOR_*/GIT_COMMITTER_* env vars override git
+# config, so if the harness exports them this block cannot win: say so, and
+# tell the session how to clear them per command.
+CCENV_GIT_NAME="Luke Evans"
+CCENV_GIT_EMAIL="17546908+LukeEvansTech@users.noreply.github.com"
+if command -v git >/dev/null 2>&1; then
+	git config --global user.name "$CCENV_GIT_NAME"
+	git config --global user.email "$CCENV_GIT_EMAIL"
+	if [ -n "${GIT_AUTHOR_NAME:-}${GIT_AUTHOR_EMAIL:-}${GIT_COMMITTER_NAME:-}${GIT_COMMITTER_EMAIL:-}" ]; then
+		log "Git identity: harness exports GIT_AUTHOR_*/GIT_COMMITTER_* (${GIT_AUTHOR_NAME:-unset} <${GIT_AUTHOR_EMAIL:-unset}>), which OVERRIDE git config — commits will not be authored as ${CCENV_GIT_NAME}. Prefix every commit with: env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL git commit ..."
+	else
+		log "Git identity: commits author as ${CCENV_GIT_NAME} <${CCENV_GIT_EMAIL}> (git config --global)."
+	fi
+fi
+
 # --- profile detection -----------------------------------------------------
 # The catalog is a single repo checkout now, so the profile is auto-detected
 # from on-disk markers. CLAUDE_ENV_PROFILE, if set non-empty, overrides

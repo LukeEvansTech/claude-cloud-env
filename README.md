@@ -30,6 +30,16 @@ bash /tmp/ccenv-bootstrap.sh
 the most restricted network access level. Bumping the version comment forces a cache
 rebuild the next time an environment starts.
 
+## Git identity
+
+The cloud harness commits as `Claude <noreply@anthropic.com>`, so every squash-merge
+lands on GitHub with Claude as the author plus a `Co-authored-by: Claude` trailer.
+`hooks/session-start.sh` sets `git config --global user.name` / `user.email` to the
+account owner's GitHub noreply address instead, and reports whether the harness also
+exports `GIT_AUTHOR_*` / `GIT_COMMITTER_*` — those env vars override Git config, so
+when that warning appears the identity has to be cleared per command
+(`env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL … git commit`).
+
 ## Environment catalog
 
 The per-environment definitions (network access level, env vars, 1Password item

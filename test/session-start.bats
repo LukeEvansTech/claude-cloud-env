@@ -1,5 +1,16 @@
 #!/usr/bin/env bats
 
+# Every test runs in its own subshell; point HOME and GIT_CONFIG_GLOBAL at the
+# per-test tmpdir so the hook's `git config --global` (run by the cloud-path
+# tests, and by the ccenv_hostname tests when they source the hook) writes a
+# throwaway .gitconfig, never the developer's real one. GIT_CONFIG_GLOBAL is
+# set explicitly: a machine that uses it to select a git identity would
+# otherwise still route writes to the real file even with HOME overridden.
+setup() {
+	export HOME="$BATS_TEST_TMPDIR" GIT_CONFIG_GLOBAL="$BATS_TEST_TMPDIR/.gitconfig"
+	unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+}
+
 @test "exits 0 silently when not in a cloud session" {
 	unset CLAUDE_CODE_REMOTE
 	run bash hooks/session-start.sh
@@ -76,6 +87,27 @@ _source_hook_and_call_ccenv_hostname() {
 	cd "$BATS_TEST_TMPDIR" || return 1
 	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 \
 		bash -c 'source "$1" >/dev/null 2>&1; ccenv_hostname "$2" "$3"' _ "$script" "$1" "$2"
+}
+
+@test "sets the cloud session git identity to the account owner" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	[ "$(git config --global user.name)" = "Luke Evans" ]
+	[ "$(git config --global user.email)" = "17546908+LukeEvansTech@users.noreply.github.com" ]
+	[[ "$output" == *"Git identity: commits author as Luke Evans"* ]]
+}
+
+@test "warns when the harness exports GIT_AUTHOR_* env vars (they override git config)" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	GIT_AUTHOR_NAME=Claude GIT_AUTHOR_EMAIL=noreply@anthropic.com PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Git identity: harness exports GIT_AUTHOR_*/GIT_COMMITTER_* (Claude <noreply@anthropic.com>)"* ]]
+	[[ "$output" == *"env -u GIT_AUTHOR_NAME"* ]]
 }
 
 @test "ccenv_hostname strips underscores from the session-ID segment and lowercases" {

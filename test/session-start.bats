@@ -57,7 +57,7 @@ setup() {
 # — no curl call ever fires — but it deterministically takes the
 # "token is bad" branch, so this exercises the real .mise.local.toml-writing
 # code path without any network access.
-@test "talos profile clears placeholder GitHub token and disables aqua+github verification in .mise.local.toml" {
+@test "talos profile clears the placeholder GitHub token in .mise.local.toml" {
 	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
 	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
 	cd "$BATS_TEST_TMPDIR"
@@ -68,10 +68,60 @@ setup() {
 	[ -f .mise.local.toml ]
 	grep -q '^GITHUB_TOKEN = ""$' .mise.local.toml
 	grep -q '^GH_TOKEN = ""$' .mise.local.toml
+}
+
+# Regression guard. Disabling verification is not merely unnecessary here, it
+# BREAKS installs: mise.lock records `provenance = "cosign"` for some tools and
+# installing those with cosign off trips mise's downgrade-attack protection.
+# Measured 2026-08-31 — with cosign ENABLED and --locked, the same install
+# printed "✓ Cosign verified" and succeeded. Never write these back.
+@test "talos profile never disables signature or attestation verification" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	mkdir -p talos
+	: >talos/talconfig.yaml
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	if grep -Eq '(cosign|slsa|minisign|attestations)[[:space:]]*=[[:space:]]*false' .mise.local.toml; then
+		echo "verification was disabled in .mise.local.toml: $(cat .mise.local.toml)" >&2
+		return 1
+	fi
+	# ...and the env prefix handed to mise must not disable it either.
+	if [[ "$output" == *"MISE_AQUA_COSIGN=false"* ]]; then
+		echo "env prefix disabled cosign: $output" >&2
+		return 1
+	fi
+}
+
+@test "talos profile locks installs to mise.lock when the repo commits one" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	mkdir -p talos
+	: >talos/talconfig.yaml
+	: >mise.lock
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
 	grep -q '^\[settings\]$' .mise.local.toml
-	grep -q '^aqua.github_attestations = false$' .mise.local.toml
-	grep -q '^github.slsa = false$' .mise.local.toml
-	grep -q '^github.github_attestations = false$' .mise.local.toml
+	grep -q '^locked = true$' .mise.local.toml
+}
+
+# `--locked`/MISE_LOCKED=1 fails every install when there is no lockfile to
+# read URLs from, so it must stay conditional — not every participating repo
+# commits one.
+@test "no lockfile means no locked setting" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	mkdir -p talos
+	: >talos/talconfig.yaml
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	if grep -q 'locked = true' .mise.local.toml; then
+		echo "locked was set with no mise.lock present: $(cat .mise.local.toml)" >&2
+		return 1
+	fi
 }
 
 # ccenv_hostname (tailnet hostname derivation) — the function is defined

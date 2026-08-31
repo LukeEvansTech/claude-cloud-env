@@ -58,31 +58,73 @@ if [ "${CCENV_SKIP_INSTALL:-}" != "1" ] && ! command -v op >/dev/null 2>&1 && [ 
 fi
 
 # --- GitHub token sanity check ----------------------------------------------
-# The cloud sandbox injects a placeholder GITHUB_TOKEN/GH_TOKEN (~14 chars)
-# that GitHub rejects with 401 "Bad credentials" on any authenticated call.
-# mise sends that token on release lookups for BOTH the aqua backend and
-# the github backend (talos-cluster resolves two tools — flate, yayamlls — # codespell:ignore flate
+# mise sends GITHUB_TOKEN on release/asset lookups for BOTH the aqua backend
+# and the github backend (talos-cluster resolves two tools — flate, yayamlls — # codespell:ignore flate
 # via github:) AND on fetching each backend's signature/attestation data
 # (aqua: cosign, SLSA, minisign, GitHub Artifact Attestations; github: SLSA,
 # GitHub Artifact Attestations — confirmed as separate settings with no
-# cascade from aqua.*, e.g. `MISE_GITHUB_SLSA` doesn't touch `aqua.slsa`),
-# so every `mise exec`/`mise install` for a tool that isn't already cached
-# fails outright — including this hook's own `mise exec -- just talos
-# gen-config` below. Probe the token once: if it's missing or bad, every
-# mise invocation in this script gets prefixed with GITHUB_TOKEN=''
-# GH_TOKEN='' (falls back to anonymous GitHub API access, ~60 req/h) and
-# both backends' signature/attestation verification gets disabled
-# (clearing the token alone still 401s there — GitHub's attestations API
-# needs *some* credential, unlike its releases API; reproduced empirically
-# with a real bad token against a real, uncached github: tool). talos-
+# cascade from aqua.*, e.g. `MISE_GITHUB_SLSA` doesn't touch `aqua.slsa`).
+# The token is not merely a rate-limit nicety: when aqua believes it is
+# authenticated it resolves a release asset through the GitHub *API*
+# (…/releases/assets/<id>), and unauthenticated it falls back to the plain
+# public release-download URL, which is not API-gated. So a token the API
+# refuses takes the whole install down rather than just slowing it — this
+# hook's own `mise exec -- just talos gen-config` below included.
+#
+# The sandbox supplies no usable token, and NOT in the way this check
+# originally assumed. GITHUB_TOKEN/GH_TOKEN hold the literal sentinel
+# `proxy-injected`; the egress proxy enforces GitHub access itself rather
+# than passing a credential through to GitHub. Measured in a live cloud
+# session on 2026-08-31:
+#
+#   - api.github.com/rate_limit answers 200 with an IDENTICAL synthetic body
+#     whether or not an Authorization header is sent (same quota, same reset
+#     timestamp, a 15000 limit no anonymous caller would ever get). The proxy
+#     answers it directly; the request never reaches GitHub.
+#   - EVERY api.github.com/repos/… call returns 403 — authenticated or
+#     anonymous, third-party repositories AND this session's own sources.
+#     Only the message differs ("Use add_repo to request access" for a
+#     third-party repository, an org-level gate for our own).
+#
+# So the previous probe (curl …/rate_limit) was measuring the proxy, not the
+# token, and could only ever answer "the token is fine". mise then kept it
+# and 403'd on the first uncached tool: on 2026-08-31 `just talos gen-config`
+# died on aqua:zizmorcore/zizmor with `github auth: yes` and
+# `GitHub access to this repository is not enabled for this session`, which
+# reads like a missing repository rather than a token that should have been
+# dropped. Never probe an unscoped endpoint for this again — check the
+# sentinel first (deterministic, no network), then fall back to a capability
+# probe against a THIRD-PARTY repository, which is what mise actually needs.
+#
+# When the token is unusable, every mise invocation in this script gets
+# prefixed with GITHUB_TOKEN='' GH_TOKEN='' — which is what makes aqua take
+# the public release-download path — and both backends' signature/attestation
+# verification gets disabled (clearing the token alone still fails there:
+# those APIs need *some* credential, unlike the release download). talos-
 # cluster pins tool checksums via its committed mise.lock, so artifact
-# integrity is still enforced via the lockfile without live attestation
-# calls.
+# integrity is still enforced by the lockfile without live attestation calls.
+
+# Token values that are not credentials. Space-separated, overridable so a
+# sandbox that renames its sentinel needs no edit here.
+CCENV_GH_TOKEN_SENTINELS="${CCENV_GH_TOKEN_SENTINELS:-proxy-injected}"
+
+# A third-party repository this environment will never have as a session
+# source, on the releases API — the exact capability mise needs. Overridable
+# for the same reason.
+CCENV_GH_PROBE_URL="${CCENV_GH_PROBE_URL:-https://api.github.com/repos/cli/cli/releases/latest}"
+
 ccenv_gh_token_ok() {
 	[ -n "${GITHUB_TOKEN:-}" ] || return 1
-	# No -S: a bad token 401ing here is the EXPECTED path, not an error —
-	# -S would print curl's own error text to stderr for that expected case.
-	curl -fs -m 8 -o /dev/null -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/rate_limit
+	# Substring match on a space-padded list: no word splitting, so this
+	# stays clean under shellcheck and needs no IFS juggling.
+	case " ${CCENV_GH_TOKEN_SENTINELS} " in
+	*" ${GITHUB_TOKEN} "*) return 1 ;;
+	esac
+	# No -S: a refused token here is the EXPECTED path, not an error — -S
+	# would print curl's own error text to stderr for that expected case.
+	# Any non-2xx (401, the proxy's 403, a network failure) fails closed and
+	# drops the token, which is the branch that actually installs tools.
+	curl -fs -m 8 -o /dev/null -H "Authorization: token ${GITHUB_TOKEN}" "$CCENV_GH_PROBE_URL"
 }
 
 # CCENV_SKIP_INSTALL=1 (test-only, see op self-heal above) short-circuits
@@ -91,6 +133,10 @@ ccenv_gh_token_ok() {
 CCENV_MISE_ENV_PREFIX=""
 if [ "${CCENV_SKIP_INSTALL:-}" = "1" ] || ! ccenv_gh_token_ok; then
 	CCENV_MISE_ENV_PREFIX="GITHUB_TOKEN= GH_TOKEN= MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false"
+	[ "${CCENV_SKIP_INSTALL:-}" = "1" ] ||
+		log "GitHub token: unusable against the GitHub API — mise runs with GITHUB_TOKEN/GH_TOKEN cleared (aqua then takes the public release-download path) and signature/attestation verification disabled; mise.lock still enforces checksums."
+else
+	log "GitHub token: usable against the GitHub API — left in place for mise."
 fi
 
 # Derive a DNS-label-safe tailnet hostname from the repo basename and the

@@ -322,3 +322,19 @@ _call_ccenv_gh_token_ok() {
 		return 1
 	fi
 }
+
+# Invoking talosctl at an absolute path is what stops mise re-resolving the
+# manifest, but it also drops the [env] block .mise.toml declares — including
+# TALOSCONFIG. Measured 2026-08-31: gen-config succeeded and the kubeconfig
+# step still failed for exactly that reason.
+@test "talosctl is invoked with TALOSCONFIG set explicitly" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	local code
+	code="$(grep -v '^[[:space:]]*#' "$script")"
+	# shellcheck disable=SC2016 # deliberate: this matches the LITERAL source
+	# text, which contains an unexpanded ${PWD}. Expanding it here would make
+	# the assertion match this test's own cwd instead of the hook's code.
+	grep -q 'TALOSCONFIG="${PWD}/talos/clusterconfig/talosconfig"' <<<"$code"
+	# shellcheck disable=SC2016 # same: literal source match, not an expansion
+	grep -q 'KUBECONFIG="${PWD}/kubeconfig"' <<<"$code"
+}

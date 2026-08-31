@@ -139,3 +139,77 @@ _source_hook_and_call_ccenv_hostname() {
 	[ "$status" -eq 0 ]
 	[ "$output" = "claude-containers" ]
 }
+
+# ccenv_gh_token_ok — the probe deciding whether mise keeps the sandbox's
+# GITHUB_TOKEN. Sourced under the same safe harness as ccenv_hostname above
+# (restricted PATH, CCENV_SKIP_INSTALL=1, so the script's own call is
+# short-circuited by the `||` and never fires), then invoked directly against
+# a stub `curl` that ALWAYS succeeds. The always-succeeding stub is the whole
+# point: with a probe that cannot fail, the only thing left that can return
+# non-zero is the sentinel check, so these tests pin the sentinel and the
+# probe URL rather than a network outcome. The stub also records the URLs it
+# was handed, which is how the "never probe an unscoped endpoint" rule is
+# enforced mechanically instead of by comment.
+_call_ccenv_gh_token_ok() {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	local stub="$BATS_TEST_TMPDIR/stub"
+	mkdir -p "$stub"
+	cat >"$stub/curl" <<-'STUB'
+		#!/bin/sh
+		for a in "$@"; do
+			case "$a" in https://*) printf '%s\n' "$a" >>"$CCENV_TEST_CURL_LOG" ;; esac
+		done
+		exit 0
+	STUB
+	chmod +x "$stub/curl"
+	: >"$BATS_TEST_TMPDIR/curl.log"
+	cd "$BATS_TEST_TMPDIR" || return 1
+	CCENV_TEST_CURL_LOG="$BATS_TEST_TMPDIR/curl.log" PATH="$stub:/usr/bin:/bin" \
+		CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 \
+		bash -c 'source "$1" >/dev/null 2>&1; ccenv_gh_token_ok' _ "$script"
+}
+
+@test "ccenv_gh_token_ok rejects the sandbox's proxy-injected sentinel without any network call" {
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	GITHUB_TOKEN=proxy-injected run _call_ccenv_gh_token_ok
+	[ "$status" -ne 0 ]
+	# Must decide from the value alone: the sandbox's proxy answers
+	# /rate_limit 200 regardless, so any network probe would say "fine".
+	[ ! -s "$BATS_TEST_TMPDIR/curl.log" ]
+}
+
+@test "ccenv_gh_token_ok probes a third-party repository, never an unscoped endpoint" {
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	GITHUB_TOKEN=ghp_pretend_this_one_is_real run _call_ccenv_gh_token_ok
+	[ "$status" -eq 0 ]
+	grep -q '/repos/.*/releases/latest' "$BATS_TEST_TMPDIR/curl.log"
+	# /rate_limit is unscoped — it cannot distinguish a repo-scoped token
+	# from an unrestricted one, which is the bug this replaced. Spelled as
+	# an if/return rather than a leading `!`, which shellcheck rejects in
+	# bats files (SC2314) because a negated command only fails the test
+	# when it happens to be the last one.
+	if grep -q 'rate_limit' "$BATS_TEST_TMPDIR/curl.log"; then
+		echo "probe used an unscoped endpoint: $(cat "$BATS_TEST_TMPDIR/curl.log")" >&2
+		return 1
+	fi
+}
+
+@test "ccenv_gh_token_ok honours CCENV_GH_TOKEN_SENTINELS and CCENV_GH_PROBE_URL overrides" {
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	GITHUB_TOKEN=some-future-sentinel CCENV_GH_TOKEN_SENTINELS="proxy-injected some-future-sentinel" \
+		run _call_ccenv_gh_token_ok
+	[ "$status" -ne 0 ]
+
+	GITHUB_TOKEN=ghp_pretend_this_one_is_real \
+		CCENV_GH_PROBE_URL=https://api.github.com/repos/jqlang/jq/releases/latest \
+		run _call_ccenv_gh_token_ok
+	[ "$status" -eq 0 ]
+	grep -q 'jqlang/jq' "$BATS_TEST_TMPDIR/curl.log"
+}
+
+@test "ccenv_gh_token_ok rejects an unset token before probing" {
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE GITHUB_TOKEN
+	run _call_ccenv_gh_token_ok
+	[ "$status" -ne 0 ]
+	[ ! -s "$BATS_TEST_TMPDIR/curl.log" ]
+}

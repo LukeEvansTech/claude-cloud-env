@@ -263,3 +263,26 @@ _call_ccenv_gh_token_ok() {
 	[ "$status" -ne 0 ]
 	[ ! -s "$BATS_TEST_TMPDIR/curl.log" ]
 }
+
+# Cloud sandboxes are reused between runs and .mise.local.toml is gitignored,
+# so a copy written by an older hook survives the repo re-fetch. The
+# GITHUB_TOKEN guard would then skip the rewrite and keep the stale
+# verification-disabling settings — which is exactly what happened live on
+# 2026-08-31, making a correctly-shipped fix look like it had not worked.
+@test "a stale .mise.local.toml disabling verification is discarded and regenerated" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	mkdir -p talos
+	: >talos/talconfig.yaml
+	: >mise.lock
+	# Exactly what the previous hook version wrote.
+	printf '[env]\nGITHUB_TOKEN = ""\nGH_TOKEN = ""\n\n[settings]\naqua.cosign = false\naqua.slsa = false\ngithub.slsa = false\n' >.mise.local.toml
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	if grep -Eq '(cosign|slsa|minisign|attestations)[[:space:]]*=[[:space:]]*false' .mise.local.toml; then
+		echo "stale verification-disabling settings survived: $(cat .mise.local.toml)" >&2
+		return 1
+	fi
+	grep -q '^locked = true$' .mise.local.toml
+}

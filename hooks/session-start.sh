@@ -265,6 +265,21 @@ fi
 # --- per-profile secret-derived state -------------------------------------
 case "$PROFILE" in
 talos)
+	# Heal a .mise.local.toml left by an older hook. Cloud sandboxes are
+	# REUSED between runs and this file is gitignored, so it survives the
+	# per-run repo re-fetch — and the `grep -q '^GITHUB_TOKEN'` guard below
+	# then sees a "already written" file and skips the rewrite, silently
+	# preserving the verification-disabling settings that break locked
+	# installs. Observed live on 2026-08-31: the hook script self-updated
+	# correctly (no `cosign = false` anywhere in it) while the generated
+	# file still carried `aqua.cosign = false` from the previous run, so
+	# gen-config kept failing for a fix that had actually shipped.
+	# Deleting is safe: everything in it is regenerated below from
+	# INTERNAL_DOMAIN_RE and the current settings.
+	if [ -f .mise.local.toml ] && grep -Eq '^[[:space:]]*(aqua|github)\.[a-z_]+[[:space:]]*=[[:space:]]*false' .mise.local.toml; then
+		rm -f .mise.local.toml
+		log "Talos: discarded a stale .mise.local.toml from an older hook (it disabled signature verification, which breaks --locked installs); regenerating."
+	fi
 	if [ -n "${INTERNAL_DOMAIN_RE:-}" ] && [ ! -f .mise.local.toml ]; then
 		printf '[env]\nINTERNAL_DOMAIN_RE = '\''%s'\''\n' "${INTERNAL_DOMAIN_RE}" >.mise.local.toml
 		log "Talos: .mise.local.toml written (identifier guard active)."

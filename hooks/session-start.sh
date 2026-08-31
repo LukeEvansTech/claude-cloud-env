@@ -130,13 +130,42 @@ ccenv_gh_token_ok() {
 # CCENV_SKIP_INSTALL=1 (test-only, see op self-heal above) short-circuits
 # this check too — ccenv_gh_token_ok is never actually called (so curl never
 # fires) when it's set, keeping the bats suite network-free.
+# --- how mise installs here -------------------------------------------------
+# Clearing the token is NOT enough on its own, and the verification-disabling
+# that used to live here was actively the wrong move. Both measured in live
+# cloud sessions on 2026-08-31:
+#
+#   - EVERY api.github.com/repos/... call is 403 in this sandbox, so any mise
+#     operation that RESOLVES a version dies regardless of the token. `--locked`
+#     fixes that outright: it installs from the URLs already recorded in
+#     mise.lock and makes no API calls at all ("Require lockfile URLs to be
+#     present during installation ... This prevents API calls to GitHub, aqua
+#     registry, etc." — `mise install --help`). Same thing via MISE_LOCKED=1.
+#   - Disabling cosign/SLSA/attestations did not help and actively HURT.
+#     mise.lock records `provenance = "cosign"` for some tools, and installing
+#     those with verification disabled trips mise's downgrade-attack
+#     protection, so the install FAILS. Sigstore is not behind the sandbox's
+#     GitHub gate: `MISE_AQUA_COSIGN=true mise install -y --locked
+#     aqua:mikefarah/yq` printed "✓ Cosign verified" and installed cleanly,
+#     where the same command with cosign disabled failed.
+#
+# So: lock the installs, and leave supply-chain verification ON.
+#
+# MISE_LOCKED is only added when the repo actually commits a lockfile —
+# `--locked` on a repo without one fails every install, and the opentofu
+# profile's repos do not all ship a mise.lock.
 CCENV_MISE_ENV_PREFIX=""
 if [ "${CCENV_SKIP_INSTALL:-}" = "1" ] || ! ccenv_gh_token_ok; then
-	CCENV_MISE_ENV_PREFIX="GITHUB_TOKEN= GH_TOKEN= MISE_AQUA_COSIGN=false MISE_AQUA_SLSA=false MISE_AQUA_MINISIGN=false MISE_AQUA_GITHUB_ATTESTATIONS=false MISE_GITHUB_SLSA=false MISE_GITHUB_GITHUB_ATTESTATIONS=false"
+	CCENV_MISE_ENV_PREFIX="GITHUB_TOKEN= GH_TOKEN="
 	[ "${CCENV_SKIP_INSTALL:-}" = "1" ] ||
-		log "GitHub token: unusable against the GitHub API — mise runs with GITHUB_TOKEN/GH_TOKEN cleared (aqua then takes the public release-download path) and signature/attestation verification disabled; mise.lock still enforces checksums."
+		log "GitHub token: unusable against the GitHub API — mise runs with GITHUB_TOKEN/GH_TOKEN cleared."
 else
 	log "GitHub token: usable against the GitHub API — left in place for mise."
+fi
+if [ -f mise.lock ]; then
+	CCENV_MISE_ENV_PREFIX="${CCENV_MISE_ENV_PREFIX:+$CCENV_MISE_ENV_PREFIX }MISE_LOCKED=1"
+	[ "${CCENV_SKIP_INSTALL:-}" = "1" ] ||
+		log "mise: installing with MISE_LOCKED=1 (mise.lock URLs only, no GitHub API calls); signature verification left enabled."
 fi
 
 # Derive a DNS-label-safe tailnet hostname from the repo basename and the
@@ -250,15 +279,20 @@ talos)
 	# GH_TOKEN='' (see the CTX bullet below — this is REQUIRED, not just
 	# helpful; reproduced empirically: a bad process-level token plus this
 	# exact [env]-cleared config still 401'd on a fresh github: install,
-	# and only clearing the token in the real process env fixed it). The
-	# aqua.*/github.* verify toggles below don't have this limitation —
-	# mise reads settings from [settings] (or real env vars), never through
-	# the [env]-merge path, so they DO apply to mise's own installs
-	# regardless of who's asking.
+	# and only clearing the token in the real process env fixed it).
+	#
+	# `locked = true` in [settings] is the durable half of the fix above: it
+	# applies to a bare in-session `mise install` too, not just the commands
+	# this hook prefixes. NOTHING here disables signature verification any
+	# more — doing so is what broke installs of lockfile entries carrying
+	# `provenance = "cosign"`.
 	if [ -n "$CCENV_MISE_ENV_PREFIX" ] && { [ ! -f .mise.local.toml ] || ! grep -q '^GITHUB_TOKEN' .mise.local.toml; }; then
 		[ -f .mise.local.toml ] || printf '[env]\n' >.mise.local.toml
-		printf 'GITHUB_TOKEN = ""\nGH_TOKEN = ""\n\n[settings]\naqua.cosign = false\naqua.slsa = false\naqua.minisign = false\naqua.github_attestations = false\ngithub.slsa = false\ngithub.github_attestations = false\n' >>.mise.local.toml
-		log "Talos: .mise.local.toml updated — GITHUB_TOKEN/GH_TOKEN cleared for mise-spawned children only (does NOT cover mise's own installs; prefix those commands directly) and aqua/github signature+attestation verification disabled (sandbox token 401s; mise.lock checksums still enforce integrity)."
+		printf 'GITHUB_TOKEN = ""\nGH_TOKEN = ""\n' >>.mise.local.toml
+		if [ -f mise.lock ]; then
+			printf '\n[settings]\nlocked = true\n' >>.mise.local.toml
+		fi
+		log "Talos: .mise.local.toml updated — GITHUB_TOKEN/GH_TOKEN cleared for mise-spawned children only (does NOT cover mise's own installs; prefix those commands directly); installs locked to mise.lock URLs with signature verification left enabled."
 	fi
 	if [ -f .mise.local.toml ]; then
 		# Hook-written config is untrusted until `mise trust` runs — mise

@@ -380,7 +380,18 @@ talos)
 				# CCENV_MISE_ENV_PREFIX is a second, independent env prefix
 				# applied to the `env` call it wraps — both coexist fine since
 				# each is consumed by a different command in the pipeline.
-				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 "$CCENV_TALOSCTL" kubeconfig --nodes "$CP_NODE" --force; then
+				# TALOSCONFIG/KUBECONFIG must be passed explicitly. The repo's
+				# .mise.toml declares both under [env], so the old
+				# `mise exec -- talosctl` inherited them for free; invoking the
+				# binary at an absolute path (which is what stops mise
+				# re-resolving the manifest) does not. Measured 2026-08-31:
+				# gen-config succeeded and this step still failed, purely
+				# because talosctl had no TALOSCONFIG — exporting it by hand in
+				# the same session reached all three nodes immediately.
+				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 \
+					TALOSCONFIG="${PWD}/talos/clusterconfig/talosconfig" \
+					KUBECONFIG="${PWD}/kubeconfig" \
+					"$CCENV_TALOSCTL" kubeconfig "${PWD}/kubeconfig" --nodes "$CP_NODE" --force; then
 					log "Talos: kubeconfig fetched from ${CP_NODE}."
 				else
 					log "Talos: kubeconfig fetch FAILED — run manually: talosctl kubeconfig --nodes ${CP_NODE} --force"

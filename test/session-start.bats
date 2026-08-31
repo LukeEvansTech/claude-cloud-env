@@ -286,3 +286,39 @@ _call_ccenv_gh_token_ok() {
 	fi
 	grep -q '^locked = true$' .mise.local.toml
 }
+
+# `mise exec` / a bare `mise install` resolve the repository's entire manifest,
+# which cannot succeed under --locked: several tools are pinned to "latest" and
+# carry no lockfile URL. Measured 2026-08-31 — the whole-manifest resolve failed
+# in seconds while naming individual pinned tools installed them cleanly. Guard
+# the shape rather than the outcome, since the talos actions need a real
+# OP_SERVICE_ACCOUNT_TOKEN and cannot run here.
+@test "gen-config never resolves the whole toolchain via mise exec or just" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	local code
+	# Strip comments: the rationale above these calls necessarily NAMES the
+	# very commands it is banning, so a naive grep matches its own docs.
+	code="$(grep -v '^[[:space:]]*#' "$script")"
+	if grep -q 'mise exec -- just talos gen-config' <<<"$code"; then
+		echo "hook still shells out to 'just talos gen-config', which drags in the whole manifest" >&2
+		return 1
+	fi
+	if grep -Eq 'mise exec -- (yq|talosctl)' <<<"$code"; then
+		echo "hook still invokes yq/talosctl through 'mise exec --', which re-resolves the manifest" >&2
+		return 1
+	fi
+	# The tools it does install must be named explicitly, not implied.
+	grep -q 'mise install -y aqua:siderolabs/talos aqua:mikefarah/yq' "$script"
+}
+
+@test "gen-config resolves tool paths through mise which, not shims" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	grep -q 'ccenv_mise_bin talhelper' "$script"
+	grep -q 'ccenv_mise_bin talosctl' "$script"
+	# talhelper is baked into the snapshot; installing it needs a release
+	# listing, which the sandbox 403s.
+	if grep -q 'mise install.*talhelper' "$script"; then
+		echo "hook tries to install talhelper; it is snapshot-baked and its release listing is 403 here" >&2
+		return 1
+	fi
+}

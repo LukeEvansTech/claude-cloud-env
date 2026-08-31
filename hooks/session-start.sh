@@ -316,13 +316,63 @@ talos)
 		# snapshot that wrote this file without ever trusting it.
 		mise trust --quiet .mise.local.toml || mise trust --quiet || true
 	fi
+	# Generate the config WITHOUT `mise exec -- just talos gen-config`.
+	#
+	# `mise exec` (and a bare `mise install`) resolves the repository's ENTIRE
+	# ~30-tool manifest, and under `--locked` that fails outright: eight tools
+	# in .mise.toml are pinned to "latest" and so carry no lockfile URL to
+	# install from. Measured 2026-08-31 — the whole-manifest resolve failed in
+	# seconds with `talosctl unavailable (install failed)`, while naming
+	# individual PINNED tools installed them cleanly, both reporting
+	# "✓ Cosign verified".
+	#
+	# So: install only the pinned tools this profile needs, resolve each
+	# binary to an absolute path once, and invoke those paths directly. No
+	# shim and no `mise exec` at run time, either of which can re-enter
+	# manifest resolution. talhelper is deliberately NOT installed — it is
+	# baked into the environment snapshot already.
+	#
+	# This inlines what `just talos gen-config` does (op fetch, LUKS fallback,
+	# talhelper genconfig). That is a deliberate coupling to talos-cluster's
+	# recipe: going through `just` would drag in `just` itself plus `gum` for
+	# its logging, and `gum` is one of the "latest"-pinned tools that cannot
+	# be installed here at all.
+	ccenv_mise_bin() {
+		# shellcheck disable=SC2086 # intentional word-split env-assignment list
+		env $CCENV_MISE_ENV_PREFIX mise which "$1" 2>/dev/null
+	}
 	if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && [ ! -f talos/clusterconfig/talosconfig ]; then
 		# shellcheck disable=SC2086 # CCENV_MISE_ENV_PREFIX is an intentional word-split env-assignment list consumed by `env`.
-		if env $CCENV_MISE_ENV_PREFIX mise exec -- just talos gen-config; then
+		env $CCENV_MISE_ENV_PREFIX mise install -y aqua:siderolabs/talos aqua:mikefarah/yq >/dev/null 2>&1 || true
+		CCENV_TALHELPER="$(ccenv_mise_bin talhelper)"
+		CCENV_YQ="$(ccenv_mise_bin yq)"
+		CCENV_TALOSCTL="$(ccenv_mise_bin talosctl)"
+		CCENV_GENCONFIG=""
+		if [ -n "$CCENV_TALHELPER" ] && [ -x "$CCENV_TALHELPER" ]; then
+			CCENV_TALSECRET="$(mktemp)"
+			if op document get talsecret --vault Talos >"$CCENV_TALSECRET" 2>/dev/null &&
+				[ -s "$CCENV_TALSECRET" ] &&
+				TALOS_LUKS_FALLBACK="$(op read 'op://Talos/talos-luks-fallback/password' 2>/dev/null)" &&
+				[ -n "$TALOS_LUKS_FALLBACK" ]; then
+				export TALOS_LUKS_FALLBACK
+				if "$CCENV_TALHELPER" genconfig \
+					--config-file talos/talconfig.yaml \
+					--secret-file "$CCENV_TALSECRET" \
+					--out-dir talos/clusterconfig; then
+					CCENV_GENCONFIG=1
+				fi
+				unset TALOS_LUKS_FALLBACK
+			fi
+			rm -f "$CCENV_TALSECRET"
+			unset CCENV_TALSECRET
+		fi
+		if [ -n "$CCENV_GENCONFIG" ]; then
 			log "Talos: talosconfig generated from 1Password talsecret."
-			# shellcheck disable=SC2086
-			CP_NODE="$(env $CCENV_MISE_ENV_PREFIX mise exec -- yq -r '[.nodes[] | select(.controlPlane == true)][0].ipAddress' talos/talconfig.yaml 2>/dev/null || true)"
-			if [ -n "$CP_NODE" ] && [ "$CP_NODE" != "null" ]; then
+			CP_NODE=""
+			if [ -n "$CCENV_YQ" ] && [ -x "$CCENV_YQ" ]; then
+				CP_NODE="$("$CCENV_YQ" -r '[.nodes[] | select(.controlPlane == true)][0].ipAddress' talos/talconfig.yaml 2>/dev/null || true)"
+			fi
+			if [ -n "$CP_NODE" ] && [ "$CP_NODE" != "null" ] && [ -n "$CCENV_TALOSCTL" ]; then
 				# Phase 0 verdict (Task 2): talosctl's gRPC client honours only
 				# HTTPS_PROXY, not ALL_PROXY/SOCKS (SOCKS times out). Also clear
 				# no_proxy/NO_PROXY — see the tailnet-join comment above. The
@@ -330,24 +380,27 @@ talos)
 				# CCENV_MISE_ENV_PREFIX is a second, independent env prefix
 				# applied to the `env` call it wraps — both coexist fine since
 				# each is consumed by a different command in the pipeline.
-				# shellcheck disable=SC2086
-				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 env $CCENV_MISE_ENV_PREFIX mise exec -- talosctl kubeconfig --nodes "$CP_NODE" --force; then
+				if no_proxy='' NO_PROXY='' http_proxy='' https_proxy=http://localhost:1055 HTTPS_PROXY=http://localhost:1055 "$CCENV_TALOSCTL" kubeconfig --nodes "$CP_NODE" --force; then
 					log "Talos: kubeconfig fetched from ${CP_NODE}."
 				else
 					log "Talos: kubeconfig fetch FAILED — run manually: talosctl kubeconfig --nodes ${CP_NODE} --force"
 				fi
+			elif [ -z "$CCENV_TALOSCTL" ]; then
+				log "Talos: kubeconfig SKIPPED — talosctl did not install (aqua:siderolabs/talos); talosconfig is still usable once talosctl is available."
 			fi
 		else
-			# Distinguish op failure from mise/toolchain resolution failure —
-			# live evidence showed op was fine while this message blamed it;
-			# the real cause was mise's aqua lookups 401ing on the sandbox's
-			# placeholder GITHUB_TOKEN.
-			if op whoami >/dev/null 2>&1; then
-				log "Talos: gen-config FAILED — op is reachable and authorised, so this is a mise/toolchain resolution failure (check GitHub token / rate limits, not OP_SERVICE_ACCOUNT_TOKEN)."
+			# Attribute the failure to the thing that actually failed. Live
+			# evidence has twice shown this message blaming the wrong
+			# component, so each branch names a distinct, checkable cause.
+			if [ -z "$CCENV_TALHELPER" ]; then
+				log "Talos: gen-config FAILED — talhelper is not available in this environment (it is normally baked into the snapshot); nothing to do with op or the GitHub token."
+			elif op whoami >/dev/null 2>&1; then
+				log "Talos: gen-config FAILED — talhelper ran and op is reachable and authorised, so this is talhelper/talconfig, not a credential or toolchain problem."
 			else
 				log "Talos: gen-config FAILED — op is unreachable or unauthorised; check OP_SERVICE_ACCOUNT_TOKEN and op connectivity."
 			fi
 		fi
+		unset CCENV_TALHELPER CCENV_YQ CCENV_TALOSCTL CCENV_GENCONFIG
 	fi
 	;;
 opentofu)

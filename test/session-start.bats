@@ -343,18 +343,28 @@ _call_ccenv_gh_token_ok() {
 # The hook must stop Claude Code stamping a `claude.ai/code/session` URL into PR
 # bodies: talos-cluster's `Scan PR title and body` check rejects those outright,
 # so without this every PR a cloud routine opens there fails CI. These tests
-# source only the attribution block, so they never touch the network.
+# exercise only the attribution block, so they never touch the network.
+#
+# The block is extracted and run via `bash <runner>` rather than sourced, so
+# the linter sees no non-constant `source` (SC1090) and no seemingly-unused
+# `log` stub (SC2329) -- the same shape as the other tests in this file.
+# (Do not start that explanation with the linter's own name: a comment
+# beginning with its name is parsed as a directive and fails to parse.)
 
-attribution_block() {
+attribution_runner() {
+	local dir="$1"
 	awk '/^# --- attribution self-heal/{f=1} /^# --- GitHub token sanity check/{f=0} f' \
-		"${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+		"${BATS_TEST_DIRNAME}/../hooks/session-start.sh" >"$dir/block.sh"
+	cat >"$dir/runner.sh" <<-'RUNNER'
+		log() { printf '%s\n' "$*"; }
+		. "$1"
+	RUNNER
 }
 
 @test "attribution: creates settings.json with the session URL disabled" {
-	local block="$BATS_TEST_TMPDIR/block.sh"
-	attribution_block >"$block"
-	log() { :; }
-	source "$block"
+	attribution_runner "$BATS_TEST_TMPDIR"
+	run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	[ "$status" -eq 0 ]
 	[ -f "$HOME/.claude/settings.json" ]
 	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['attribution']['sessionUrl'])" \
 		"$HOME/.claude/settings.json"
@@ -362,32 +372,28 @@ attribution_block() {
 }
 
 @test "attribution: preserves unrelated keys already in settings.json" {
-	local block="$BATS_TEST_TMPDIR/block.sh"
-	attribution_block >"$block"
+	attribution_runner "$BATS_TEST_TMPDIR"
 	mkdir -p "$HOME/.claude"
 	printf '%s\n' '{"model":"opus"}' >"$HOME/.claude/settings.json"
-	log() { :; }
-	source "$block"
+	run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	[ "$status" -eq 0 ]
 	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['model'])" \
 		"$HOME/.claude/settings.json"
 	[ "$output" = "opus" ]
 }
 
 @test "attribution: leaves a corrupt settings.json untouched rather than clobbering it" {
-	local block="$BATS_TEST_TMPDIR/block.sh"
-	attribution_block >"$block"
+	attribution_runner "$BATS_TEST_TMPDIR"
 	mkdir -p "$HOME/.claude"
 	printf '%s\n' 'not json' >"$HOME/.claude/settings.json"
-	log() { :; }
-	source "$block" 2>/dev/null
+	run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
 	run cat "$HOME/.claude/settings.json"
 	[ "$output" = "not json" ]
 }
 
 @test "attribution: CCENV_SKIP_ATTRIBUTION=1 writes nothing" {
-	local block="$BATS_TEST_TMPDIR/block.sh"
-	attribution_block >"$block"
-	log() { :; }
-	CCENV_SKIP_ATTRIBUTION=1 source "$block"
+	attribution_runner "$BATS_TEST_TMPDIR"
+	CCENV_SKIP_ATTRIBUTION=1 run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	[ "$status" -eq 0 ]
 	[ ! -e "$HOME/.claude/settings.json" ]
 }

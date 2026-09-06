@@ -339,6 +339,43 @@ _call_ccenv_gh_token_ok() {
 	grep -q 'KUBECONFIG="${PWD}/kubeconfig"' <<<"$code"
 }
 
+# talconfig gained a second required variable on 2026-09-03
+# (talos-cluster#4891): the etcd encryption key. It is referenced from a patch
+# rather than from talconfig.yaml, so it does not show up when you grep the
+# config file for what it needs -- the routine run of 2026-09-05 did that and
+# concluded it was unused. The hook must read it out of the talsecret document
+# it already holds, and export it BEFORE genconfig: exporting it afterwards is
+# inert, and omitting it fails every run with "variable ${TALOS_SECRETBOX_SECRET}
+# not set".
+@test "gen-config derives TALOS_SECRETBOX_SECRET from the talsecret document" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	local code export_line genconfig_line
+	code="$(grep -v '^[[:space:]]*#' "$script")"
+	grep -q 'secrets.secretboxencryptionsecret' <<<"$code"
+	grep -q 'export TALOS_SECRETBOX_SECRET' <<<"$code"
+	# The key lives inside the document already fetched for genconfig; it has
+	# no 1Password item of its own, so a standalone read cannot find it.
+	if grep -qi 'op read.*secretbox' <<<"$code"; then
+		echo "hook reads a standalone 1Password item; the key is a field inside the talsecret document" >&2
+		return 1
+	fi
+	export_line="$(grep -n 'export TALOS_SECRETBOX_SECRET' <<<"$code" | head -1 | cut -d: -f1)"
+	genconfig_line="$(grep -n 'genconfig' <<<"$code" | head -1 | cut -d: -f1)"
+	if [ "$export_line" -ge "$genconfig_line" ]; then
+		echo "TALOS_SECRETBOX_SECRET is exported at line $export_line but genconfig runs at $genconfig_line -- too late to be read" >&2
+		return 1
+	fi
+}
+
+# Both secrets are process-wide once exported, and everything after this block
+# (tailnet, attribution, whatever comes next) inherits them for no reason.
+@test "gen-config secrets do not outlive the genconfig call" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	local code
+	code="$(grep -v '^[[:space:]]*#' "$script")"
+	grep -q 'unset TALOS_LUKS_FALLBACK TALOS_SECRETBOX_SECRET' <<<"$code"
+}
+
 # --- attribution --------------------------------------------------------------
 # The hook must stop Claude Code stamping a `claude.ai/code/session` URL into PR
 # bodies: talos-cluster's `Scan PR title and body` check rejects those outright,

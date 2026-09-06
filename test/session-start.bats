@@ -338,3 +338,56 @@ _call_ccenv_gh_token_ok() {
 	# shellcheck disable=SC2016 # same: literal source match, not an expansion
 	grep -q 'KUBECONFIG="${PWD}/kubeconfig"' <<<"$code"
 }
+
+# --- attribution --------------------------------------------------------------
+# The hook must stop Claude Code stamping a `claude.ai/code/session` URL into PR
+# bodies: talos-cluster's `Scan PR title and body` check rejects those outright,
+# so without this every PR a cloud routine opens there fails CI. These tests
+# source only the attribution block, so they never touch the network.
+
+attribution_block() {
+	awk '/^# --- attribution self-heal/{f=1} /^# --- GitHub token sanity check/{f=0} f' \
+		"${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+}
+
+@test "attribution: creates settings.json with the session URL disabled" {
+	local block="$BATS_TEST_TMPDIR/block.sh"
+	attribution_block >"$block"
+	log() { :; }
+	source "$block"
+	[ -f "$HOME/.claude/settings.json" ]
+	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['attribution']['sessionUrl'])" \
+		"$HOME/.claude/settings.json"
+	[ "$output" = "False" ]
+}
+
+@test "attribution: preserves unrelated keys already in settings.json" {
+	local block="$BATS_TEST_TMPDIR/block.sh"
+	attribution_block >"$block"
+	mkdir -p "$HOME/.claude"
+	printf '%s\n' '{"model":"opus"}' >"$HOME/.claude/settings.json"
+	log() { :; }
+	source "$block"
+	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['model'])" \
+		"$HOME/.claude/settings.json"
+	[ "$output" = "opus" ]
+}
+
+@test "attribution: leaves a corrupt settings.json untouched rather than clobbering it" {
+	local block="$BATS_TEST_TMPDIR/block.sh"
+	attribution_block >"$block"
+	mkdir -p "$HOME/.claude"
+	printf '%s\n' 'not json' >"$HOME/.claude/settings.json"
+	log() { :; }
+	source "$block" 2>/dev/null
+	run cat "$HOME/.claude/settings.json"
+	[ "$output" = "not json" ]
+}
+
+@test "attribution: CCENV_SKIP_ATTRIBUTION=1 writes nothing" {
+	local block="$BATS_TEST_TMPDIR/block.sh"
+	attribution_block >"$block"
+	log() { :; }
+	CCENV_SKIP_ATTRIBUTION=1 source "$block"
+	[ ! -e "$HOME/.claude/settings.json" ]
+}

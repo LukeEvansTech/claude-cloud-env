@@ -57,6 +57,58 @@ if [ "${CCENV_SKIP_INSTALL:-}" != "1" ] && ! command -v op >/dev/null 2>&1 && [ 
 	fi
 fi
 
+# --- attribution self-heal --------------------------------------------------
+# Claude Code appends an attribution footer to PR bodies and commit messages
+# and stamps it with a session URL. talos-cluster's `Scan PR title and body`
+# check rejects `claude.ai/code/session` links outright -- such a link
+# publicly attributes the work and points at a private session -- so every PR
+# a cloud routine opens there fails CI until the footer is stripped by hand.
+# The workstations already set this in ~/.claude/settings.json; cloud sessions
+# never did, because nothing in this repo wrote it.
+#
+# This runs here rather than in bootstrap.sh on purpose: bootstrap runs as
+# root, so its $HOME is /root, not the session user's home. The hook self-
+# updates from main above, so this reaches already-built snapshots without a
+# cache rebuild -- the same reasoning as the op self-heal.
+#
+# Merge rather than overwrite: settings.json may hold unrelated keys, and a
+# clobber would silently drop them. CCENV_SKIP_ATTRIBUTION=1 is test-only.
+if [ "${CCENV_SKIP_ATTRIBUTION:-}" != "1" ] && command -v python3 >/dev/null 2>&1; then
+	if python3 - "$HOME/.claude/settings.json" <<-'PY'; then
+		import json, os, sys
+
+		path = sys.argv[1]
+		want = {"commit": "", "pr": "", "sessionUrl": False}
+		try:
+		    with open(path) as fh:
+		        cfg = json.load(fh)
+		    if not isinstance(cfg, dict):
+		        raise ValueError("settings.json is not an object")
+		except FileNotFoundError:
+		    cfg = {}
+		except (ValueError, OSError) as exc:
+		    print(f"unreadable: {exc}", file=sys.stderr)
+		    sys.exit(1)
+
+		if cfg.get("attribution") == want:
+		    sys.exit(2)  # already correct; nothing to write
+
+		cfg["attribution"] = want
+		os.makedirs(os.path.dirname(path), exist_ok=True)
+		tmp = path + ".ccenv.tmp"
+		with open(tmp, "w") as fh:
+		    json.dump(cfg, fh, indent=2)
+		    fh.write("\n")
+		os.replace(tmp, path)
+	PY
+		log "Attribution: set commit/pr footers empty and sessionUrl=false (no session link in PR bodies)."
+	elif [ $? -eq 2 ]; then
+		log "Attribution: already correct."
+	else
+		log "Attribution: could NOT update settings.json -- PRs may carry a session link, which some repos' CI rejects."
+	fi
+fi
+
 # --- GitHub token sanity check ----------------------------------------------
 # mise sends GITHUB_TOKEN on release/asset lookups for BOTH the aqua backend
 # and the github backend (talos-cluster resolves two tools — flate, yayamlls — # codespell:ignore flate

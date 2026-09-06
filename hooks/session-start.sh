@@ -407,13 +407,39 @@ talos)
 				TALOS_LUKS_FALLBACK="$(op read 'op://Talos/talos-luks-fallback/password' 2>/dev/null)" &&
 				[ -n "$TALOS_LUKS_FALLBACK" ]; then
 				export TALOS_LUKS_FALLBACK
+				# talconfig interpolates a SECOND secret, and it is not a 1Password
+				# item of its own: the etcd encryption key lives INSIDE the talsecret
+				# document already fetched above, which is where talos-cluster's own
+				# recipe reads it from (talos/mod.just:
+				# `.secrets.secretboxencryptionsecret`).
+				#
+				# It arrived with talos-cluster#4891 on 2026-09-03 and broke every
+				# gen-config from the next morning on: `failed to generate talos
+				# config: variable ${TALOS_SECRETBOX_SECRET} not set`. It is easy to
+				# miss because talconfig.yaml does not mention it — the reference is in
+				# a patch (talos/patches/controller/etcd-encryption.yaml), so grepping
+				# the config file for required variables finds nothing. The routine run
+				# of 2026-09-05 did exactly that and concluded the variable was unused.
+				#
+				# Derived, not required: an absent key logs and still attempts
+				# genconfig, so this does not break if talconfig stops interpolating it.
+				TALOS_SECRETBOX_SECRET=""
+				if [ -n "$CCENV_YQ" ] && [ -x "$CCENV_YQ" ]; then
+					TALOS_SECRETBOX_SECRET="$("$CCENV_YQ" -r '.secrets.secretboxencryptionsecret' "$CCENV_TALSECRET" 2>/dev/null || true)"
+				fi
+				if [ -n "$TALOS_SECRETBOX_SECRET" ] && [ "$TALOS_SECRETBOX_SECRET" != "null" ]; then
+					export TALOS_SECRETBOX_SECRET
+				else
+					TALOS_SECRETBOX_SECRET=""
+					log "Talos: no secretboxencryptionsecret in the talsecret document (or yq unavailable) — gen-config will fail if talconfig still interpolates TALOS_SECRETBOX_SECRET."
+				fi
 				if "$CCENV_TALHELPER" genconfig \
 					--config-file talos/talconfig.yaml \
 					--secret-file "$CCENV_TALSECRET" \
 					--out-dir talos/clusterconfig; then
 					CCENV_GENCONFIG=1
 				fi
-				unset TALOS_LUKS_FALLBACK
+				unset TALOS_LUKS_FALLBACK TALOS_SECRETBOX_SECRET
 			fi
 			rm -f "$CCENV_TALSECRET"
 			unset CCENV_TALSECRET

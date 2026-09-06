@@ -338,3 +338,62 @@ _call_ccenv_gh_token_ok() {
 	# shellcheck disable=SC2016 # same: literal source match, not an expansion
 	grep -q 'KUBECONFIG="${PWD}/kubeconfig"' <<<"$code"
 }
+
+# --- attribution --------------------------------------------------------------
+# The hook must stop Claude Code stamping a `claude.ai/code/session` URL into PR
+# bodies: talos-cluster's `Scan PR title and body` check rejects those outright,
+# so without this every PR a cloud routine opens there fails CI. These tests
+# exercise only the attribution block, so they never touch the network.
+#
+# The block is extracted and run via `bash <runner>` rather than sourced, so
+# the linter sees no non-constant `source` (SC1090) and no seemingly-unused
+# `log` stub (SC2329) -- the same shape as the other tests in this file.
+# (Do not start that explanation with the linter's own name: a comment
+# beginning with its name is parsed as a directive and fails to parse.)
+
+attribution_runner() {
+	local dir="$1"
+	awk '/^# --- attribution self-heal/{f=1} /^# --- GitHub token sanity check/{f=0} f' \
+		"${BATS_TEST_DIRNAME}/../hooks/session-start.sh" >"$dir/block.sh"
+	cat >"$dir/runner.sh" <<-'RUNNER'
+		log() { printf '%s\n' "$*"; }
+		. "$1"
+	RUNNER
+}
+
+@test "attribution: creates settings.json with the session URL disabled" {
+	attribution_runner "$BATS_TEST_TMPDIR"
+	run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	[ "$status" -eq 0 ]
+	[ -f "$HOME/.claude/settings.json" ]
+	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['attribution']['sessionUrl'])" \
+		"$HOME/.claude/settings.json"
+	[ "$output" = "False" ]
+}
+
+@test "attribution: preserves unrelated keys already in settings.json" {
+	attribution_runner "$BATS_TEST_TMPDIR"
+	mkdir -p "$HOME/.claude"
+	printf '%s\n' '{"model":"opus"}' >"$HOME/.claude/settings.json"
+	run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	[ "$status" -eq 0 ]
+	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['model'])" \
+		"$HOME/.claude/settings.json"
+	[ "$output" = "opus" ]
+}
+
+@test "attribution: leaves a corrupt settings.json untouched rather than clobbering it" {
+	attribution_runner "$BATS_TEST_TMPDIR"
+	mkdir -p "$HOME/.claude"
+	printf '%s\n' 'not json' >"$HOME/.claude/settings.json"
+	run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	run cat "$HOME/.claude/settings.json"
+	[ "$output" = "not json" ]
+}
+
+@test "attribution: CCENV_SKIP_ATTRIBUTION=1 writes nothing" {
+	attribution_runner "$BATS_TEST_TMPDIR"
+	CCENV_SKIP_ATTRIBUTION=1 run bash "$BATS_TEST_TMPDIR/runner.sh" "$BATS_TEST_TMPDIR/block.sh"
+	[ "$status" -eq 0 ]
+	[ ! -e "$HOME/.claude/settings.json" ]
+}

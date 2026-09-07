@@ -60,6 +60,28 @@ install -d /opt/claude-cloud-env
 curl -fsSL "${REPO_RAW}/hooks/session-start.sh" -o /opt/claude-cloud-env/session-start.sh
 chmod +x /opt/claude-cloud-env/session-start.sh
 
+# Seed the attribution setting into the SNAPSHOT. Claude Code otherwise stamps
+# a claude.ai/code/session URL into PR bodies, and talos-cluster's `Scan PR
+# title and body` check rejects those, so every PR a cloud routine opens there
+# fails CI until the footer is stripped.
+#
+# The hook writes the same setting, but a SessionStart hook runs AFTER Claude
+# Code has loaded its settings, so its write cannot affect the session that
+# made it — on 2026-09-07 it wrote sessionUrl=false at 06:02:51 and the PR
+# opened at 06:09:39 still carried the footer. Writing it here, before the
+# snapshot is taken, is what makes it apply from the first turn.
+#
+# Same script, so there is one implementation of the merge and no second copy
+# to drift. CCENV_UPDATED=1 skips the self-update (it was just fetched above),
+# and CCENV_ATTRIBUTION_ONLY=1 stops the hook before anything needing a live
+# session. $HOME is root's here and sessions run as root too (the shared mise
+# data dir below assumes the same), so this lands in the home the session
+# reads. Never fatal: a snapshot without it degrades to the old behaviour.
+if ! CLAUDE_CODE_REMOTE=true CCENV_UPDATED=1 CCENV_ATTRIBUTION_ONLY=1 \
+	bash /opt/claude-cloud-env/session-start.sh; then
+	log "WARN: attribution seed failed (non-fatal); PRs may carry a session link"
+fi
+
 # mise shims for non-interactive shells (assumes the setup script runs as
 # root, per Task 1's runbook — Phase 0 did not confirm the session user;
 # if a session ever shows a different user, install mise data under a

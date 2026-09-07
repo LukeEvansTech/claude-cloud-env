@@ -376,6 +376,117 @@ _call_ccenv_gh_token_ok() {
 	grep -q 'unset TALOS_LUKS_FALLBACK TALOS_SECRETBOX_SECRET' <<<"$code"
 }
 
+# ccenv_predates_boot — the guard that tells a talosconfig this session
+# generated from one the environment SNAPSHOT carried in. Sourced under the
+# same harness as ccenv_hostname; CCENV_UPTIME_FILE fakes /proc/uptime so the
+# arithmetic runs anywhere, and the mtime read falls back to BSD stat.
+_call_ccenv_predates_boot() {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	cd "$BATS_TEST_TMPDIR" || return 1
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 \
+		CCENV_UPTIME_FILE="$2" \
+		bash -c 'source "$1" >/dev/null 2>&1
+			command -v ccenv_predates_boot >/dev/null || { echo "ccenv_predates_boot is not defined at top level" >&2; exit 99; }
+			ccenv_predates_boot "$2"' _ "$script" "$1"
+}
+
+@test "ccenv_predates_boot flags a file older than this boot" {
+	# Booted an hour ago; the file is a day old, so it cannot be ours.
+	echo "3600.00 0.00" >"$BATS_TEST_TMPDIR/uptime"
+	touch -t "$(date -v-1d '+%Y%m%d%H%M' 2>/dev/null || date -d '1 day ago' '+%Y%m%d%H%M')" \
+		"$BATS_TEST_TMPDIR/talosconfig"
+	run _call_ccenv_predates_boot "$BATS_TEST_TMPDIR/talosconfig" "$BATS_TEST_TMPDIR/uptime"
+	[ "$status" -eq 0 ]
+}
+
+@test "ccenv_predates_boot accepts a file written since boot" {
+	# Booted a day ago; the file is from a moment ago, so it is this
+	# session's and must not be regenerated over.
+	echo "86400.00 0.00" >"$BATS_TEST_TMPDIR/uptime"
+	touch "$BATS_TEST_TMPDIR/talosconfig"
+	run _call_ccenv_predates_boot "$BATS_TEST_TMPDIR/talosconfig" "$BATS_TEST_TMPDIR/uptime"
+	[ "$status" -eq 1 ]
+}
+
+@test "ccenv_predates_boot answers no rather than guessing when it cannot tell" {
+	# A missing file, an unreadable uptime source and a non-numeric one must
+	# all report NOT stale. Regenerating on a probe that failed would be a
+	# guess, and the fallback path it triggers costs a 1Password round trip.
+	touch "$BATS_TEST_TMPDIR/talosconfig"
+	echo "3600.00 0.00" >"$BATS_TEST_TMPDIR/uptime"
+	run _call_ccenv_predates_boot "$BATS_TEST_TMPDIR/absent" "$BATS_TEST_TMPDIR/uptime"
+	[ "$status" -eq 1 ]
+	run _call_ccenv_predates_boot "$BATS_TEST_TMPDIR/talosconfig" "$BATS_TEST_TMPDIR/no-such-uptime"
+	[ "$status" -eq 1 ]
+	echo "not-a-number" >"$BATS_TEST_TMPDIR/uptime"
+	run _call_ccenv_predates_boot "$BATS_TEST_TMPDIR/talosconfig" "$BATS_TEST_TMPDIR/uptime"
+	[ "$status" -eq 1 ]
+}
+
+# The bare `! -f talosconfig` guard read a snapshot-carried config as "already
+# generated" and skipped gen-config — and with it the kubeconfig fetch nested
+# inside. Two runs in a row (2026-09-06, 2026-09-07) found the same file with
+# the same mtime and never exercised gen-config at all.
+@test "gen-config runs again when the talosconfig came from the snapshot" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	local code
+	code="$(grep -v '^[[:space:]]*#' "$script")"
+	grep -q 'ccenv_predates_boot talos/clusterconfig/talosconfig' <<<"$code"
+	# The guard must not be the bare existence test any more.
+	if grep -q 'OP_SERVICE_ACCOUNT_TOKEN:-}" \] && \[ ! -f talos/clusterconfig/talosconfig \] *; then' <<<"$code"; then
+		echo "gen-config still gated on file existence alone; a snapshot-carried config will skip it" >&2
+		return 1
+	fi
+}
+
+# --- attribution seeding ------------------------------------------------------
+# A SessionStart hook runs AFTER Claude Code loads its settings, so the hook's
+# own attribution write cannot affect the session that made it. bootstrap.sh
+# re-invokes the hook at snapshot-build time to get it in early; that only
+# works if the flag both writes the setting and stops before anything needing
+# a live session.
+
+@test "CCENV_ATTRIBUTION_ONLY writes the attribution setting" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	cd "$BATS_TEST_TMPDIR"
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_UPDATED=1 \
+		CCENV_ATTRIBUTION_ONLY=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['attribution'])" \
+		"$HOME/.claude/settings.json"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"'sessionUrl': False"* ]]
+}
+
+@test "CCENV_ATTRIBUTION_ONLY stops before every live-session block" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	cd "$BATS_TEST_TMPDIR"
+	PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_UPDATED=1 \
+		CCENV_ATTRIBUTION_ONLY=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	# Snapshot-build time has no session, no tailnet and no checkout; anything
+	# from those sections running here would be acting on the builder.
+	if grep -qiE 'tailnet|profile|mise|github token' <<<"$output"; then
+		echo "attribution-only run reached a live-session block: $output" >&2
+		return 1
+	fi
+}
+
+@test "bootstrap seeds attribution through the hook, not a second copy" {
+	local boot="${BATS_TEST_DIRNAME}/../bootstrap.sh"
+	local code
+	# Strip comments: the rationale beside the call necessarily names the very
+	# setting the assertion below bans from appearing in code here.
+	code="$(grep -v '^[[:space:]]*#' "$boot")"
+	grep -q 'CCENV_ATTRIBUTION_ONLY=1' <<<"$code"
+	# One implementation of the merge. A duplicated python block here would
+	# drift from the hook's the first time either changes.
+	if grep -q 'sessionUrl' <<<"$code"; then
+		echo "bootstrap.sh carries its own copy of the attribution write" >&2
+		return 1
+	fi
+}
+
 # --- attribution --------------------------------------------------------------
 # The hook must stop Claude Code stamping a `claude.ai/code/session` URL into PR
 # bodies: talos-cluster's `Scan PR title and body` check rejects those outright,

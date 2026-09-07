@@ -109,6 +109,22 @@ if [ "${CCENV_SKIP_ATTRIBUTION:-}" != "1" ] && command -v python3 >/dev/null 2>&
 	fi
 fi
 
+# bootstrap.sh re-invokes this script with CCENV_ATTRIBUTION_ONLY=1 so the
+# setting above is written at SNAPSHOT-BUILD time, not session time. That
+# matters because a SessionStart hook runs AFTER Claude Code has loaded its
+# settings, so the hook's own write cannot affect the session that made it:
+# on 2026-09-07 the hook set sessionUrl=false at 06:02:51 and the PR opened
+# at 06:09:39 still carried a session-URL footer, which talos-cluster's
+# PR-body scan then failed. The in-session write above is kept as a
+# self-heal for snapshots built before this change.
+#
+# Everything below this line needs a live session (a tailnet, a 1Password
+# service-account token, a repo checkout) and must not run against the
+# snapshot builder.
+if [ "${CCENV_ATTRIBUTION_ONLY:-}" = "1" ]; then
+	exit 0
+fi
+
 # --- GitHub token sanity check ----------------------------------------------
 # mise sends GITHUB_TOKEN on release/asset lookups for BOTH the aqua backend
 # and the github backend (talos-cluster resolves two tools — flate, yayamlls — # codespell:ignore flate
@@ -241,6 +257,26 @@ ccenv_hostname() {
 		hn="claude-session"
 	fi
 	printf '%s' "$hn"
+}
+
+# True when <file> exists and its mtime is older than this container's
+# boot — i.e. it came from the snapshot image, not from this session. Any
+# uncertainty (no /proc/uptime, unreadable mtime, non-numeric either) is
+# reported as NOT stale, so a probe that cannot answer leaves the existing
+# behaviour alone rather than triggering a regeneration on a guess.
+# CCENV_UPTIME_FILE is overridable so the arithmetic is testable off-Linux.
+ccenv_predates_boot() {
+	local file="$1" up boot mtime
+	[ -f "$file" ] || return 1
+	[ -r "${CCENV_UPTIME_FILE:-/proc/uptime}" ] || return 1
+	up="$(cut -d. -f1 "${CCENV_UPTIME_FILE:-/proc/uptime}" 2>/dev/null)"
+	case "$up" in '' | *[!0-9]*) return 1 ;; esac
+	boot=$(($(date +%s) - up))
+	# GNU stat first, BSD second: the sandbox is Linux, the test host may
+	# not be, and a real test beats a grep of the source.
+	mtime="$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null)"
+	case "$mtime" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$mtime" -lt "$boot" ]
 }
 
 # --- tailnet join (ephemeral tagged node, userspace networking) -----------
@@ -393,7 +429,29 @@ talos)
 		# shellcheck disable=SC2086 # intentional word-split env-assignment list
 		env $CCENV_MISE_ENV_PREFIX mise which "$1" 2>/dev/null
 	}
-	if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && [ ! -f talos/clusterconfig/talosconfig ]; then
+	# A talosconfig can reach this checkout from the environment SNAPSHOT
+	# rather than from this session. talos/clusterconfig/ is gitignored, so it
+	# survives the per-run repo re-fetch, and a config generated during an
+	# earlier session can be baked into the cached image — the same mechanism
+	# as the stale .mise.local.toml above, except what persists here is a live
+	# cluster credential.
+	#
+	# The bare `! -f` guard below then reads that as "already generated" and
+	# skips gen-config entirely, which also skips the kubeconfig fetch nested
+	# inside it. Observed on 2026-09-06 and 2026-09-07: both runs found the
+	# SAME file, mtime 2026-09-05 06:01, and neither exercised gen-config at
+	# all — so the TALOS_SECRETBOX_SECRET fix shipped on 09-06 sat unproven for
+	# two days while the hook reported success.
+	#
+	# Regenerate OVER a foreign config rather than deleting it first: if
+	# gen-config then fails, the session still has a working credential instead
+	# of none, and the log below says which one it is holding.
+	CCENV_STALE_TALOSCONFIG=""
+	if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && ccenv_predates_boot talos/clusterconfig/talosconfig; then
+		CCENV_STALE_TALOSCONFIG=1
+		log "Talos: the talosconfig in the checkout predates this sandbox's boot, so it came from the environment snapshot rather than this session. Regenerating over it."
+	fi
+	if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && { [ ! -f talos/clusterconfig/talosconfig ] || [ -n "$CCENV_STALE_TALOSCONFIG" ]; }; then
 		# shellcheck disable=SC2086 # CCENV_MISE_ENV_PREFIX is an intentional word-split env-assignment list consumed by `env`.
 		env $CCENV_MISE_ENV_PREFIX mise install -y aqua:siderolabs/talos aqua:mikefarah/yq >/dev/null 2>&1 || true
 		CCENV_TALHELPER="$(ccenv_mise_bin talhelper)"
@@ -488,8 +546,14 @@ talos)
 			else
 				log "Talos: gen-config FAILED — op is unreachable or unauthorised; check OP_SERVICE_ACCOUNT_TOKEN and op connectivity."
 			fi
+			# Say which credential the session is actually left holding. Without
+			# this the run finds a working talosconfig, concludes the hook did
+			# its job, and the failure above goes unread.
+			if [ -n "$CCENV_STALE_TALOSCONFIG" ]; then
+				log "Talos: the snapshot's older talosconfig is STILL IN PLACE and was not replaced. It may work, but it is not this session's; treat cluster access as unverified until gen-config succeeds."
+			fi
 		fi
-		unset CCENV_TALHELPER CCENV_YQ CCENV_TALOSCTL CCENV_GENCONFIG
+		unset CCENV_TALHELPER CCENV_YQ CCENV_TALOSCTL CCENV_GENCONFIG CCENV_STALE_TALOSCONFIG
 	fi
 	;;
 opentofu)

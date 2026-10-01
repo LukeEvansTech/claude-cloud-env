@@ -318,15 +318,22 @@ fi
 # `Co-authored-by: Claude` trailer. Author cloud commits as the account owner
 # instead — the GitHub noreply address attributes to the account without
 # exposing a mailbox. GIT_AUTHOR_*/GIT_COMMITTER_* env vars override git
-# config, so if the harness exports them this block cannot win: say so, and
-# tell the session how to clear them per command.
+# config, so if the harness exports them they are unset for every later Bash
+# command through CLAUDE_ENV_FILE. A per-command `env -u` prefix was not
+# enough: an implicit commit (a `git merge` resolving a conflict) skipped it
+# and failed talos-cluster's authorship scan on #5438.
 CCENV_GIT_NAME="Luke Evans"
 CCENV_GIT_EMAIL="17546908+LukeEvansTech@users.noreply.github.com"
 if command -v git >/dev/null 2>&1; then
 	git config --global user.name "$CCENV_GIT_NAME"
 	git config --global user.email "$CCENV_GIT_EMAIL"
 	if [ -n "${GIT_AUTHOR_NAME:-}${GIT_AUTHOR_EMAIL:-}${GIT_COMMITTER_NAME:-}${GIT_COMMITTER_EMAIL:-}" ]; then
-		log "Git identity: harness exports GIT_AUTHOR_*/GIT_COMMITTER_* (${GIT_AUTHOR_NAME:-unset} <${GIT_AUTHOR_EMAIL:-unset}>), which OVERRIDE git config — commits will not be authored as ${CCENV_GIT_NAME}. Prefix every commit with: env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL git commit ..."
+		if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+			echo 'unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL' >>"$CLAUDE_ENV_FILE"
+			log "Git identity: harness exports GIT_AUTHOR_*/GIT_COMMITTER_* (${GIT_AUTHOR_NAME:-unset} <${GIT_AUTHOR_EMAIL:-unset}>); unset for every later Bash command via CLAUDE_ENV_FILE, so commits, merges included, author as ${CCENV_GIT_NAME}. Confirm with: git var GIT_AUTHOR_IDENT"
+		else
+			log "Git identity: harness exports GIT_AUTHOR_*/GIT_COMMITTER_* (${GIT_AUTHOR_NAME:-unset} <${GIT_AUTHOR_EMAIL:-unset}>), which OVERRIDE git config, and there is no CLAUDE_ENV_FILE to clear them. Prefix every git command that commits (commit, merge, rebase, cherry-pick) with: env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL"
+		fi
 	else
 		log "Git identity: commits author as ${CCENV_GIT_NAME} <${CCENV_GIT_EMAIL}> (git config --global)."
 	fi

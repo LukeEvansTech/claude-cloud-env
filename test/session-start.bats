@@ -150,14 +150,34 @@ _source_hook_and_call_ccenv_hostname() {
 	[[ "$output" == *"Git identity: commits author as Luke Evans"* ]]
 }
 
-@test "warns when the harness exports GIT_AUTHOR_* env vars (they override git config)" {
+@test "warns when the harness exports GIT_AUTHOR_* env vars and there is no CLAUDE_ENV_FILE" {
 	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
-	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE CLAUDE_ENV_FILE
 	cd "$BATS_TEST_TMPDIR"
 	GIT_AUTHOR_NAME=Claude GIT_AUTHOR_EMAIL=noreply@anthropic.com PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"Git identity: harness exports GIT_AUTHOR_*/GIT_COMMITTER_* (Claude <noreply@anthropic.com>)"* ]]
 	[[ "$output" == *"env -u GIT_AUTHOR_NAME"* ]]
+}
+
+@test "clears harness GIT_AUTHOR_*/GIT_COMMITTER_* for later commands via CLAUDE_ENV_FILE" {
+	local script="${BATS_TEST_DIRNAME}/../hooks/session-start.sh"
+	unset CLAUDE_ENV_PROFILE OP_SERVICE_ACCOUNT_TOKEN INTERNAL_DOMAIN_RE
+	cd "$BATS_TEST_TMPDIR"
+	local envfile="$BATS_TEST_TMPDIR/claude-env"
+	: >"$envfile"
+	GIT_AUTHOR_NAME=Claude GIT_AUTHOR_EMAIL=noreply@anthropic.com GIT_COMMITTER_NAME=Claude GIT_COMMITTER_EMAIL=noreply@anthropic.com \
+		CLAUDE_ENV_FILE="$envfile" PATH="/usr/bin:/bin" CLAUDE_CODE_REMOTE=true CCENV_SKIP_INSTALL=1 run bash "$script"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"unset for every later Bash command via CLAUDE_ENV_FILE"* ]]
+	# A later command sources the file with the harness vars still exported; a merge
+	# commit made then must carry the account owner, not the harness identity.
+	# shellcheck disable=SC2016 # $1 expands in the inner bash, not here
+	run env GIT_AUTHOR_NAME=Claude GIT_AUTHOR_EMAIL=noreply@anthropic.com GIT_COMMITTER_NAME=Claude GIT_COMMITTER_EMAIL=noreply@anthropic.com \
+		bash -c 'source "$1"; git var GIT_AUTHOR_IDENT; git var GIT_COMMITTER_IDENT' _ "$envfile"
+	[ "$status" -eq 0 ]
+	[[ "${lines[0]}" == "Luke Evans <17546908+LukeEvansTech@users.noreply.github.com>"* ]]
+	[[ "${lines[1]}" == "Luke Evans <17546908+LukeEvansTech@users.noreply.github.com>"* ]]
 }
 
 @test "ccenv_hostname strips underscores from the session-ID segment and lowercases" {

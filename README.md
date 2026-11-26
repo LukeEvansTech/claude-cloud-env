@@ -7,10 +7,10 @@ a credential belongs in this repository.
 
 ## Two-phase rule
 
-| Phase                         | File                     | Runs                                              | Contains                                                                |
-| ----------------------------- | ------------------------ | ------------------------------------------------- | ----------------------------------------------------------------------- |
-| Setup (once, snapshotted)     | `bootstrap.sh`           | As root, before Claude Code launches              | Tools only — mise, tailscale, op CLI, toolchain warm-up. Never secrets. |
-| Session start (every session) | `hooks/session-start.sh` | After Claude Code launches, on every start/resume | Secrets and per-session state — tailnet join, 1Password-backed config.  |
+| Phase                         | File                     | Runs                                              | Contains                                                                         |
+| ----------------------------- | ------------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Setup (once, snapshotted)     | `bootstrap.sh`           | As root, before Claude Code launches              | Tools only — mise, tailscale, op CLI, obscura, toolchain warm-up. Never secrets. |
+| Session start (every session) | `hooks/session-start.sh` | After Claude Code launches, on every start/resume | Secrets and per-session state — tailnet join, 1Password-backed config.           |
 
 The split exists because the setup script's output is snapshotted for reuse; anything
 written there would leak into every future session's filesystem. Secrets only ever flow

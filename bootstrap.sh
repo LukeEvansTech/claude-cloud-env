@@ -13,6 +13,10 @@ set -euo pipefail
 REPO_RAW="https://raw.githubusercontent.com/LukeEvansTech/claude-cloud-env/main"
 TS_VERSION="1.102.2"
 OP_VERSION="2.32.0"
+# Bump these two together, by hand: the checksum is the sha256 of the
+# obscura-x86_64-linux.tar.gz asset on the pinned release.
+OBSCURA_VERSION="0.2.7"
+OBSCURA_SHA256="11b53d27cd743e00e196e216920e7f3f794cf378e3f1792b8d25d3beabaf9cad"
 
 log() { printf '[claude-cloud-env] %s\n' "$*"; }
 
@@ -54,6 +58,42 @@ if ! command -v op >/dev/null 2>&1; then
 	fi
 	install -m755 /tmp/op-install/op /usr/local/bin/op
 	rm -rf /tmp/op.zip /tmp/op-install
+fi
+
+# Obscura headless browser CLI (Apache-2.0), so scheduled routines can read
+# JS-rendered pages from Bash with `obscura fetch` / `obscura scrape`. Direct
+# binary install like tailscale and op above. The release tarball holds two
+# binaries, obscura and obscura-worker, which must sit side by side. Optional
+# tooling, so never fatal: a failed download, a checksum mismatch or a bad
+# archive logs a WARN and installs nothing. Every step is tested explicitly
+# rather than left to `set -e`, which bash suspends inside a function called
+# on the left of `||`.
+install_obscura() {
+	local tmp rc=0
+	if ! tmp="$(mktemp -d)"; then
+		log "WARN: obscura temp dir failed (non-fatal)"
+		return 1
+	fi
+	if ! curl -fsSL "https://github.com/h4ckf0r0day/obscura/releases/download/v${OBSCURA_VERSION}/obscura-x86_64-linux.tar.gz" -o "${tmp}/obscura.tgz"; then
+		log "WARN: obscura download failed (non-fatal)"
+		rc=1
+	elif ! printf '%s  %s\n' "${OBSCURA_SHA256}" "${tmp}/obscura.tgz" | sha256sum -c --status -; then
+		log "WARN: obscura checksum mismatch; not installing (non-fatal)"
+		rc=1
+	elif ! tar -xzf "${tmp}/obscura.tgz" -C "${tmp}" obscura obscura-worker; then
+		log "WARN: obscura archive did not extract (non-fatal)"
+		rc=1
+	elif ! install -m755 "${tmp}/obscura-worker" /usr/local/bin/obscura-worker ||
+		! install -m755 "${tmp}/obscura" /usr/local/bin/obscura; then
+		log "WARN: obscura install failed (non-fatal)"
+		rc=1
+	fi
+	rm -rf "${tmp}"
+	return "${rc}"
+}
+if [ "$(obscura --version 2>/dev/null || true)" != "obscura ${OBSCURA_VERSION}" ] || [ ! -x /usr/local/bin/obscura-worker ]; then
+	log "installing obscura ${OBSCURA_VERSION}"
+	install_obscura || true
 fi
 
 install -d /opt/claude-cloud-env

@@ -18,6 +18,10 @@ case "$*" in
 	if [ -n "${FAKE_READBACK:-}" ]; then printf '%s' "$FAKE_READBACK"; elif [ -s "$FAKE_QUERY" ]; then tail -n 1 "$FAKE_INSERTS"; fi
 	printf '\n%s' "${FAKE_QUERY_CODE:-200}"
 	;;
+*/select/logsql/query*state:\**)
+	cat "${FAKE_STATE_QUERY:-$FAKE_QUERY}"
+	printf '\n%s' "${FAKE_QUERY_CODE:-200}"
+	;;
 */select/logsql/query*)
 	cat "$FAKE_QUERY"
 	printf '\n%s' "${FAKE_QUERY_CODE:-200}"
@@ -29,7 +33,7 @@ EOF
 	export FAKE_INSERTS="$BATS_TEST_TMPDIR/inserts.jsonl" FAKE_QUERY="$BATS_TEST_TMPDIR/query.out"
 	export LOOPS_VLOGS_URL="https://logs.example.test" LOOPS_PROXY="" LOOPS_RETRY_SLEEP=0
 	export LOOPS_STATE_DIR="$BATS_TEST_TMPDIR/state"
-	unset CLAUDE_CODE_REMOTE FAKE_CURL_FAIL FAKE_INSERT_CODE FAKE_QUERY_CODE FAKE_READBACK
+	unset CLAUDE_CODE_REMOTE FAKE_CURL_FAIL FAKE_INSERT_CODE FAKE_QUERY_CODE FAKE_READBACK FAKE_STATE_QUERY
 	echo '{"_time":"2026-01-01T00:00:00Z","event":"finish","outcome":"nothing","_msg":"prev","state":"{\"n\":1}"}' >"$FAKE_QUERY"
 }
 
@@ -192,4 +196,14 @@ EOF2
 	CLAUDE_CODE_REMOTE_SESSION_ID=one "$LOOP" start demo --every 1h --sources a
 	CLAUDE_CODE_REMOTE_SESSION_ID=two run "$LOOP" finish demo --outcome nothing --covered a --summary q
 	[ "$(last_insert | jq -r .outcome)" = "partial" ]
+}
+
+@test "start shows the newest saved state even when the last run saved none" {
+	echo '{"_time":"2026-01-02T00:00:00Z","event":"finish","outcome":"failed","_msg":"lookup failed"}' >"$FAKE_QUERY"
+	echo '{"_time":"2026-01-01T00:00:00Z","event":"finish","outcome":"nothing","_msg":"prev","state":"{\"n\":7}"}' >"$BATS_TEST_TMPDIR/state.out"
+	FAKE_STATE_QUERY="$BATS_TEST_TMPDIR/state.out" run "$LOOP" start demo --every 1h --sources a
+	[ "$status" -eq 0 ]
+	[[ "$output" == *'"outcome": "failed"'* ]]
+	[[ "$output" == *'"n": 7'* ]]
+	[[ "$output" == *'"state_saved_at": "2026-01-01T00:00:00Z"'* ]]
 }

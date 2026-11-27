@@ -20,6 +20,7 @@ set -uo pipefail
 
 APP="${LOOPS_APP:-loops}"
 PROXY="${LOOPS_PROXY-socks5://127.0.0.1:1055}"
+# Local to the sandbox, which one run owns; runs never share it.
 STATE_DIR="${LOOPS_STATE_DIR:-${TMPDIR:-/tmp}/loops}"
 HOOK="${LOOPS_SESSION_HOOK:-/opt/claude-cloud-env/session-start.sh}"
 STATE_MAX_BYTES=4096
@@ -200,7 +201,8 @@ cmd_finish() {
 	local state=''
 	if [ -n "$state_file" ]; then
 		[ -f "$state_file" ] || die "finish: no state file $state_file"
-		state="$(jq -c . "$state_file" 2>/dev/null)" || die "finish: state file is not valid JSON"
+		state="$(jq -ces 'if length == 1 then .[0] else error("one value") end' "$state_file" 2>/dev/null)" ||
+			die "finish: state file must hold exactly one JSON value"
 		[ "${#state}" -le "$STATE_MAX_BYTES" ] || die "finish: state is ${#state} bytes, limit ${STATE_MAX_BYTES}"
 	fi
 

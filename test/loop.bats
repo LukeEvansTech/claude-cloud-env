@@ -13,7 +13,7 @@ case "$*" in
 	cat >>"$FAKE_INSERTS"
 	printf '%s' "${FAKE_INSERT_CODE:-200}"
 	;;
-*/select/logsql/query*run:=*)
+*/select/logsql/query*rec:=*)
 	# The read-back of a record just written: answer with that record.
 	if [ -n "${FAKE_READBACK:-}" ]; then printf '%s' "$FAKE_READBACK"; elif [ -s "$FAKE_QUERY" ]; then tail -n 1 "$FAKE_INSERTS"; fi
 	printf '\n%s' "${FAKE_QUERY_CODE:-200}"
@@ -151,7 +151,7 @@ EOF2
 	"$LOOP" start demo --every 1h --sources a
 	FAKE_READBACK='<html>Sign in</html>' run "$LOOP" finish demo --outcome nothing --covered a --summary q
 	[ "$status" -eq 3 ]
-	FAKE_READBACK='{"run":"other","event":"finish"}' run "$LOOP" finish demo --outcome nothing --covered a --summary q
+	FAKE_READBACK='{"run":"other","event":"finish","rec":"other"}' run "$LOOP" finish demo --outcome nothing --covered a --summary q
 	[ "$status" -eq 3 ]
 }
 
@@ -165,5 +165,13 @@ EOF2
 	run "$LOOP" start demo --every 1h --max-age 1h30s --sources a
 	[ "$status" -eq 2 ]
 	run "$LOOP" start demo --every h --sources a
+	[ "$status" -eq 2 ]
+	run "$LOOP" start demo --every 08h --sources a
+	[ "$status" -eq 2 ]
+}
+
+@test "start fails when its local state cannot be saved" {
+	mkdir -p "$LOOPS_STATE_DIR/demo.json"
+	run "$LOOP" start demo --every 1h --sources a
 	[ "$status" -eq 2 ]
 }

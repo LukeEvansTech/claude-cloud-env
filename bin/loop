@@ -40,7 +40,7 @@ usage() {
 
 # 15m, 6h, 1d, 1w or bare seconds -> seconds.
 seconds() {
-	[[ "$1" =~ ^[0-9]+[smhdw]?$ ]] || return 1
+	[[ "$1" =~ ^(0|[1-9][0-9]*)[smhdw]?$ ]] || return 1
 	case "$1" in
 	*s) echo "${1%s}" ;;
 	*m) echo $((${1%m} * 60)) ;;
@@ -89,16 +89,19 @@ query() {
 # Writes one record, then reads it back by run and event through the query
 # path. Insert answers 200 before the line is searchable, hence the retries.
 deliver() {
-	local line="$1" run="$2" event="$3" code found _
+	local line="$1" run="$2" event="$3" code found _ rec
+	# Unique per attempt: a retry must not be confirmed by an earlier record.
+	rec="$(date +%s)-${RANDOM}${RANDOM}"
+	line="$(printf '%s' "$line" | jq -c --arg rec "$rec" '. + {rec: $rec}')"
 	code="$(printf '%s\n' "$line" | home_curl -o /dev/null -w '%{http_code}' -X POST \
 		-H 'Content-Type: application/stream+json' --data-binary @- \
 		"${LOOPS_VLOGS_URL}/insert/jsonline?_stream_fields=app,loop&_msg_field=summary&_time_field=_time")" || code=000
 	if [ "$code" = 200 ]; then
 		for _ in 1 2 3 4 5 6; do
-			found="$(query "_time:1h {app=\"${APP}\",loop=\"${SLUG}\"} run:=\"${run}\" event:=\"${event}\" | limit 1")" || found=''
+			found="$(query "_time:1h {app=\"${APP}\",loop=\"${SLUG}\"} rec:=\"${rec}\" | limit 1")" || found=''
 			# A 200 with some other body (a gateway's sign-in page) is not a record.
-			printf '%s' "$found" | jq -e --arg r "$run" --arg e "$event" \
-				'select(.run == $r and .event == $e)' >/dev/null 2>&1 && return 0
+			printf '%s' "$found" | jq -e --arg r "$run" --arg e "$event" --arg rec "$rec" \
+				'select(.run == $r and .event == $e and .rec == $rec)' >/dev/null 2>&1 && return 0
 			sleep "${LOOPS_RETRY_SLEEP:-2}"
 		done
 	fi
@@ -151,13 +154,14 @@ cmd_start() {
 	started_epoch="$(date +%s)"
 	run="${started_epoch}-${RANDOM}"
 	jq -n --arg run "$run" --arg t "$started_epoch" --arg s "$sources" --arg m "$max_age_s" \
-		'{run:$run, started:$t, sources:$s, max_age_s:$m}' >"${STATE_DIR}/${SLUG}.json"
+		'{run:$run, started:$t, sources:$s, max_age_s:$m}' >"${STATE_DIR}/${SLUG}.json" ||
+		die "start: cannot save run state in ${STATE_DIR}"
 
 	local last rc=0
 	if last="$(last_finish)"; then
 		if [ -n "$last" ]; then
 			echo "LAST RUN:"
-			printf '%s\n' "$last" | jq '{_time, outcome, summary: ._msg, covered, blocked, needs_human, state: (.state // "" | if . == "" then null else (fromjson? // .) end)}'
+			printf '%s\n' "$last" | jq '{_time, outcome, summary: ._msg, covered, blocked, needs_human, state: ((.state // "") as $s | if $s == "" then null else (try ($s | fromjson) catch $s) end)}'
 		else
 			echo "LAST RUN: none on record in ${LOOKBACK}."
 		fi

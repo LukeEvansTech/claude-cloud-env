@@ -201,9 +201,11 @@ cmd_finish() {
 	local state=''
 	if [ -n "$state_file" ]; then
 		[ -f "$state_file" ] || die "finish: no state file $state_file"
-		state="$(jq -ces 'if length == 1 then .[0] else error("one value") end' "$state_file" 2>/dev/null)" ||
-			die "finish: state file must hold exactly one JSON value"
-		[ "${#state}" -le "$STATE_MAX_BYTES" ] || die "finish: state is ${#state} bytes, limit ${STATE_MAX_BYTES}"
+		state="$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else error("one object") end' "$state_file" 2>/dev/null)" ||
+			die "finish: state file must hold exactly one JSON object"
+		local state_bytes
+		state_bytes="$(printf '%s' "$state" | wc -c | tr -d ' ')"
+		[ "$state_bytes" -le "$STATE_MAX_BYTES" ] || die "finish: state is ${state_bytes} bytes, limit ${STATE_MAX_BYTES}"
 	fi
 
 	local note='' run started sources max_age_s

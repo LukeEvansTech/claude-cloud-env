@@ -113,6 +113,12 @@ last_insert() { tail -n 1 "$FAKE_INSERTS"; }
 	printf '{"a":1}\n{"b":2}\n' >"$BATS_TEST_TMPDIR/s.json"
 	run "$LOOP" finish demo --outcome nothing --covered a --summary q --state "$BATS_TEST_TMPDIR/s.json"
 	[ "$status" -eq 2 ]
+	echo 'null' >"$BATS_TEST_TMPDIR/s.json"
+	run "$LOOP" finish demo --outcome nothing --covered a --summary q --state "$BATS_TEST_TMPDIR/s.json"
+	[ "$status" -eq 2 ]
+	jq -n '{x: ("é" * 3000)}' >"$BATS_TEST_TMPDIR/s.json"
+	run "$LOOP" finish demo --outcome nothing --covered a --summary q --state "$BATS_TEST_TMPDIR/s.json"
+	[ "$status" -eq 2 ]
 	jq -n '{x: ("y" * 5000)}' >"$BATS_TEST_TMPDIR/s.json"
 	run "$LOOP" finish demo --outcome nothing --covered a --summary q --state "$BATS_TEST_TMPDIR/s.json"
 	[ "$status" -eq 2 ]

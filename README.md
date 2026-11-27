@@ -40,6 +40,33 @@ exports `GIT_AUTHOR_*` / `GIT_COMMITTER_*` — those env vars override Git confi
 when that warning appears the identity has to be cleared per command
 (`env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL … git commit`).
 
+## Run records for scheduled runs
+
+`bin/loop` gives a scheduled run an honest record. The run calls `loop start` first and
+`loop finish` last; each writes one JSON line to a VictoriaLogs server, where alert rules
+watch the age of every loop's last success, so a run that never fired is noticed too.
+
+```bash
+loop start mail-poll --every 1h --sources "mail,metrics"
+loop finish mail-poll --outcome nothing --covered "mail,metrics" --summary "no replies"
+```
+
+- Outcomes are `changed`, `nothing`, `partial` and `failed`; only the first two count as a
+  success. A claimed success with a blocked source, or with a declared source left
+  unaccounted for, is recorded as `partial`.
+- `start` prints the previous finish record, including the small JSON `state` a run saved
+  with `--state`, so a run can pick up where the last one stopped. A failed lookup reads
+  `UNKNOWN`, never "first run".
+- `finish` reads its record back after writing it and exits 3 with `RECORD NOT DELIVERED`
+  when it cannot.
+- `start` joins the tailnet itself when the session hook did not fire (a run with no
+  repository source, or several).
+
+Configuration is by environment variable, so the script holds no hostname: `LOOPS_VLOGS_URL`
+(required), `LOOPS_GATEWAY` (address to pin that host to) and `LOOPS_PROXY`. An environment
+whose Tailscale OAuth client mints a tag other than `tag:claude-cloud` names it in
+`CCENV_TS_TAG`. Tests: `bats test/`.
+
 ## Environment catalog
 
 The per-environment definitions (network access level, env vars, 1Password item

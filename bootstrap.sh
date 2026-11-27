@@ -99,6 +99,11 @@ fi
 install -d /opt/claude-cloud-env
 curl -fsSL "${REPO_RAW}/hooks/session-start.sh" -o /opt/claude-cloud-env/session-start.sh
 chmod +x /opt/claude-cloud-env/session-start.sh
+if curl -fsSL "${REPO_RAW}/bin/loop" -o /usr/local/bin/loop; then
+	chmod +x /usr/local/bin/loop
+else
+	log "WARN: loop helper not installed (non-fatal)"
+fi
 
 # Seed the attribution setting into the SNAPSHOT. Claude Code otherwise stamps
 # a claude.ai/code/session URL into PR bodies, and talos-cluster's `Scan PR

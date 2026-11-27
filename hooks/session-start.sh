@@ -19,6 +19,17 @@ if [ "${CCENV_UPDATED:-}" != "1" ] && [ -w "$SELF" ]; then
 	fi
 fi
 
+# --- loop helper ------------------------------------------------------------
+# Run-record helper for scheduled runs (bin/loop). Refreshed here so a fix
+# reaches the next session without a snapshot rebuild; bootstrap.sh bakes a
+# copy for sessions where this hook never fires.
+if [ "${CCENV_SKIP_INSTALL:-}" != "1" ] &&
+	curl -fsSL --max-time 10 "${REPO_RAW}/bin/loop" -o /tmp/ccenv-loop 2>/dev/null && [ -s /tmp/ccenv-loop ]; then
+	install -m755 /tmp/ccenv-loop /usr/local/bin/loop 2>/dev/null ||
+		{ install -d "$HOME/.local/bin" && install -m755 /tmp/ccenv-loop "$HOME/.local/bin/loop"; } 2>/dev/null ||
+		log "loop: could not install the run-record helper."
+fi
+
 # --- op self-heal -----------------------------------------------------------
 # Older snapshots' bootstrap.sh installed op via `mise use --global`, which
 # only reaches PATH through /etc/profile.d — invisible to this hook's
@@ -300,12 +311,19 @@ if command -v tailscaled >/dev/null 2>&1; then
 		# --accept-routes: the cluster and all LAN devices sit behind subnet
 		# routers, not directly on the tailnet (Phase 0) — without this flag
 		# nothing infra-side is reachable even once joined.
+		# The OAuth client decides which tag it may mint; an environment with a
+		# narrower client names its tag in CCENV_TS_TAG.
+		TS_TAG="${CCENV_TS_TAG:-tag:claude-cloud}"
+		if ! [[ "$TS_TAG" =~ ^tag:[A-Za-z][A-Za-z0-9-]*$ ]]; then
+			log "Tailnet: CCENV_TS_TAG is not a valid tag; using tag:claude-cloud."
+			TS_TAG="tag:claude-cloud"
+		fi
 		if no_proxy='' NO_PROXY='' tailscale up \
 			--auth-key="${TS_OAUTH_CLIENT_SECRET}?ephemeral=true&preauthorized=true" \
-			--advertise-tags=tag:claude-cloud \
+			--advertise-tags="$TS_TAG" \
 			--accept-routes \
 			--hostname="$HN" --timeout 60s; then
-			log "Tailnet: joined as ${HN} (ephemeral, tag:claude-cloud)."
+			log "Tailnet: joined as ${HN} (ephemeral, ${TS_TAG})."
 		else
 			log "Tailnet: JOIN FAILED — see /tmp/tailscaled.log; continuing without tailnet."
 		fi

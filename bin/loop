@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# loop: run records for scheduled agent runs. A run calls `loop start` first
+# and `loop finish` last; each writes one JSON line to a VictoriaLogs server,
+# where alert rules watch the age of every loop's last success. Holds no
+# secret and no loop name: everything specific arrives as flags or env.
+#
+#   loop start  SLUG --every 6h --sources "a,b" [--max-age 13h]
+#   loop finish SLUG --outcome changed|nothing|partial|failed --summary TEXT
+#               [--covered "a,b"] [--blocked "c: reason; d: reason"]
+#               [--needs-human TEXT] [--state FILE]
+#   loop last   SLUG
+#   loop retire SLUG
+#
+# Env: LOOPS_VLOGS_URL (required, https://host), LOOPS_GATEWAY (IP to pin the
+# host to), LOOPS_PROXY (default socks5://127.0.0.1:1055; empty = direct),
+# LOOPS_APP (stream label, default loops), LOOPS_LOOKBACK (default 28d, the
+# server's retention), LOOPS_STATE_DIR.
+# Exit: 0 ok, 2 usage, 3 record not delivered, 4 last run unknown.
+set -uo pipefail
+
+APP="${LOOPS_APP:-loops}"
+PROXY="${LOOPS_PROXY-socks5://127.0.0.1:1055}"
+STATE_DIR="${LOOPS_STATE_DIR:-${TMPDIR:-/tmp}/loops}"
+HOOK="${LOOPS_SESSION_HOOK:-/opt/claude-cloud-env/session-start.sh}"
+STATE_MAX_BYTES=4096
+LOOKBACK="${LOOPS_LOOKBACK:-28d}"
+
+die() {
+	printf 'loop: %s\n' "$*" >&2
+	exit 2
+}
+
+# A flag given without its value must stop the run, not spin the parser.
+need() { [ $# -ge 2 ] || die "$1 needs a value"; }
+
+usage() {
+	sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+	exit 2
+}
+
+# 15m, 6h, 1d, 1w or bare seconds -> seconds.
+seconds() {
+	[[ "$1" =~ ^(0|[1-9][0-9]*)[smhdw]?$ ]] || return 1
+	case "$1" in
+	*s) echo "${1%s}" ;;
+	*m) echo $((${1%m} * 60)) ;;
+	*h) echo $((${1%h} * 3600)) ;;
+	*d) echo $((${1%d} * 86400)) ;;
+	*w) echo $((${1%w} * 604800)) ;;
+	*) echo "$1" ;;
+	esac
+}
+
+# "a, b,c" -> one trimmed, lowercased name per line, sorted and unique.
+names() {
+	printf '%s' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
+		tr '[:upper:]' '[:lower:]' | sed '/^$/d' | sort -u
+}
+
+# "c: reason; d: reason" -> the names before each colon.
+blocked_names() {
+	printf '%s' "$1" | tr ';' '\n' | sed 's/:.*$//' | tr '\n' ',' | { names "$(cat)"; }
+}
+
+home_curl() {
+	local host="${LOOPS_VLOGS_URL#https://}" port=443
+	host="${host%%/*}"
+	case "$host" in *:*) port="${host##*:}" host="${host%:*}" ;; esac
+	local args=(-sS --connect-timeout 10 --max-time 30 --proxy "$PROXY")
+	[ -n "${LOOPS_GATEWAY:-}" ] && args+=(--resolve "${host}:${port}:${LOOPS_GATEWAY}")
+	# The sandbox presets proxy variables whose no_proxy covers 10/8; with
+	# them set curl dials a routed address direct and is refused.
+	no_proxy='' NO_PROXY='' http_proxy='' https_proxy='' HTTP_PROXY='' HTTPS_PROXY='' \
+		all_proxy='' ALL_PROXY='' \
+		curl "${args[@]}" "$@"
+}
+
+# Prints matching records as JSON lines. Fails on a transport or HTTP error,
+# so a caller can tell "no record" from "could not ask".
+query() {
+	local out code
+	out="$(home_curl -w '\n%{http_code}' "${LOOPS_VLOGS_URL}/select/logsql/query" \
+		--data-urlencode "query=$1")" || return 1
+	code="${out##*$'\n'}"
+	[ "$code" = 200 ] || return 1
+	printf '%s' "${out%$'\n'*}"
+}
+
+# Writes one record, then reads it back by run and event through the query
+# path. Insert answers 200 before the line is searchable, hence the retries.
+deliver() {
+	local line="$1" run="$2" event="$3" code found _ rec
+	# Unique per attempt: a retry must not be confirmed by an earlier record.
+	rec="$(date +%s)-${RANDOM}${RANDOM}"
+	line="$(printf '%s' "$line" | jq -c --arg rec "$rec" '. + {rec: $rec}')"
+	code="$(printf '%s\n' "$line" | home_curl -o /dev/null -w '%{http_code}' -X POST \
+		-H 'Content-Type: application/stream+json' --data-binary @- \
+		"${LOOPS_VLOGS_URL}/insert/jsonline?_stream_fields=app,loop&_msg_field=summary&_time_field=_time")" || code=000
+	if [ "$code" = 200 ]; then
+		for _ in 1 2 3 4 5 6; do
+			found="$(query "_time:1h {app=\"${APP}\",loop=\"${SLUG}\"} rec:=\"${rec}\" | limit 1")" || found=''
+			# A 200 with some other body (a gateway's sign-in page) is not a record.
+			printf '%s' "$found" | jq -e --arg r "$run" --arg e "$event" --arg rec "$rec" \
+				'select(.run == $r and .event == $e and .rec == $rec)' >/dev/null 2>&1 && return 0
+			sleep "${LOOPS_RETRY_SLEEP:-2}"
+		done
+	fi
+	echo "RECORD NOT DELIVERED (${event}, insert HTTP ${code}). Say so in your final output."
+	return 3
+}
+
+last_finish() {
+	local out
+	out="$(query "_time:${LOOKBACK} {app=\"${APP}\",loop=\"${SLUG}\"} event:=\"finish\" | sort by (_time desc) | limit 1")" || return 1
+	[ -z "$out" ] || printf '%s' "$out" | jq -e '.event == "finish"' >/dev/null 2>&1 || return 1
+	printf '%s' "$out"
+}
+
+ensure_tailnet() {
+	[ -n "$PROXY" ] && [ "${CLAUDE_CODE_REMOTE:-}" = true ] || return 0
+	if tailscale status --json 2>/dev/null | jq -e '.BackendState == "Running"' >/dev/null 2>&1; then
+		return 0
+	fi
+	# A run with no repo source, or several, never fires the session hook.
+	[ -x "$HOOK" ] && bash "$HOOK" >"${STATE_DIR}/hook.log" 2>&1
+	tailscale status --json 2>/dev/null | jq -e '.BackendState == "Running"' >/dev/null 2>&1 ||
+		echo "TAILNET NOT UP: records cannot reach home. See ${STATE_DIR}/hook.log."
+}
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+cmd_start() {
+	local every='' max_age='' sources=''
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--every) need "$@" && every="$2" && shift 2 ;;
+		--max-age) need "$@" && max_age="$2" && shift 2 ;;
+		--sources) need "$@" && sources="$2" && shift 2 ;;
+		*) die "start: unknown argument $1" ;;
+		esac
+	done
+	local every_s max_age_s
+	every_s="$(seconds "$every")" || die "start: --every needs a duration such as 15m, 6h, 1d"
+	if [ -n "$max_age" ]; then
+		max_age_s="$(seconds "$max_age")" || die "start: bad --max-age"
+	else
+		max_age_s=$((every_s * 2 + 600))
+	fi
+	sources="$(names "$sources" | paste -sd, -)"
+	[ -n "$sources" ] || die "start: --sources needs at least one name"
+
+	ensure_tailnet
+	local run started_epoch
+	started_epoch="$(date +%s)"
+	run="${started_epoch}-${RANDOM}"
+	jq -n --arg run "$run" --arg t "$started_epoch" --arg s "$sources" --arg m "$max_age_s" \
+		--arg session "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
+		'{run:$run, started:$t, sources:$s, max_age_s:$m, session:$session}' >"${STATE_DIR}/${SLUG}.json" ||
+		die "start: cannot save run state in ${STATE_DIR}"
+
+	local last rc=0
+	if last="$(last_finish)"; then
+		if [ -n "$last" ]; then
+			echo "LAST RUN:"
+			printf '%s\n' "$last" | jq '{_time, outcome, summary: ._msg, covered, blocked, needs_human, state: ((.state // "") as $s | if $s == "" then null else (try ($s | fromjson) catch $s) end)}'
+		else
+			echo "LAST RUN: none on record in ${LOOKBACK}."
+		fi
+	else
+		echo "LAST RUN: UNKNOWN, the query failed. Do not treat this as a first run."
+		rc=4
+	fi
+
+	local line
+	line="$(jq -cn --arg app "$APP" --arg loop "$SLUG" --arg run "$run" --arg time "$(now)" \
+		--arg sources "$sources" --arg max "$max_age_s" --arg every "$every_s" \
+		--arg session "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
+		'{app:$app, loop:$loop, event:"start", run:$run, _time:$time, sources:$sources,
+		  max_age_s:$max, every_s:$every, session:$session, summary:"start"}')"
+	deliver "$line" "$run" start || rc=3
+	echo "RUN ${run} started; sources to account for at finish: ${sources}"
+	return "$rc"
+}
+
+cmd_finish() {
+	local outcome='' covered='' blocked='' summary='' needs='' state_file=''
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--outcome) need "$@" && outcome="$2" && shift 2 ;;
+		--covered) need "$@" && covered="$2" && shift 2 ;;
+		--blocked) need "$@" && blocked="$2" && shift 2 ;;
+		--summary) need "$@" && summary="$2" && shift 2 ;;
+		--needs-human) need "$@" && needs="$2" && shift 2 ;;
+		--state) need "$@" && state_file="$2" && shift 2 ;;
+		*) die "finish: unknown argument $1" ;;
+		esac
+	done
+	case "$outcome" in changed | nothing | partial | failed) ;; *) die "finish: --outcome must be changed, nothing, partial or failed" ;; esac
+	[ -n "$summary" ] || die "finish: --summary is required"
+
+	local state=''
+	if [ -n "$state_file" ]; then
+		[ -f "$state_file" ] || die "finish: no state file $state_file"
+		state="$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else error("one object") end' "$state_file" 2>/dev/null)" ||
+			die "finish: state file must hold exactly one JSON object"
+		local state_bytes
+		state_bytes="$(printf '%s' "$state" | wc -c | tr -d ' ')"
+		[ "$state_bytes" -le "$STATE_MAX_BYTES" ] || die "finish: state is ${state_bytes} bytes, limit ${STATE_MAX_BYTES}"
+	fi
+
+	local note='' run started sources max_age_s
+	local sf="${STATE_DIR}/${SLUG}.json"
+	# Sandboxes are reused: a start file from another session is not this run's.
+	if [ -s "$sf" ] && [ "$(jq -r '.session // ""' "$sf")" = "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ]; then
+		run="$(jq -r .run "$sf")" started="$(jq -r .started "$sf")"
+		sources="$(jq -r .sources "$sf")" max_age_s="$(jq -r .max_age_s "$sf")"
+	else
+		# No start in this sandbox: nothing declared, so nothing can be a success.
+		run="$(date +%s)-${RANDOM}" started="$(date +%s)" sources='' max_age_s=''
+		note="no start record for this run"
+		[ "$outcome" = failed ] || outcome=partial
+	fi
+
+	local cov blk unacc
+	cov="$(names "$covered")" blk="$(blocked_names "$blocked")"
+	unacc="$(comm -23 <(names "$sources") <(printf '%s\n%s\n' "$cov" "$blk" | sed '/^$/d' | sort -u) | paste -sd, -)"
+	if [ "$outcome" = changed ] || [ "$outcome" = nothing ]; then
+		if [ -n "$blk" ]; then
+			note="${note:+$note; }downgraded from ${outcome}: blocked sources"
+			outcome=partial
+		elif [ -n "$unacc" ]; then
+			note="${note:+$note; }downgraded from ${outcome}: sources not accounted for"
+			outcome=partial
+		fi
+	fi
+
+	local line rc=0
+	line="$(jq -cn --arg app "$APP" --arg loop "$SLUG" --arg run "$run" --arg time "$(now)" \
+		--arg outcome "$outcome" --arg sources "$sources" --arg covered "$(printf '%s' "$cov" | paste -sd, -)" \
+		--arg blocked "$blocked" --arg unacc "$unacc" --arg summary "$summary" --arg needs "$needs" \
+		--arg state "$state" --arg max "$max_age_s" --arg dur "$(($(date +%s) - started))" \
+		--arg note "$note" --arg session "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
+		--arg model "${ANTHROPIC_MODEL:-}" \
+		'{app:$app, loop:$loop, event:"finish", run:$run, _time:$time, outcome:$outcome,
+		  sources:$sources, covered:$covered, blocked:$blocked, unaccounted:$unacc,
+		  summary:$summary, needs_human:$needs, state:$state, max_age_s:$max,
+		  duration_s:$dur, note:$note, session:$session, model:$model}
+		 | with_entries(select(.value != ""))')"
+	deliver "$line" "$run" finish || rc=3
+	echo "RUN ${run} recorded as ${outcome}${note:+ (${note})}${unacc:+; unaccounted: ${unacc}}"
+	[ "$rc" = 0 ] && rm -f "$sf"
+	return "$rc"
+}
+
+cmd_last() {
+	local last
+	last="$(last_finish)" || {
+		echo "LAST RUN: UNKNOWN, the query failed."
+		return 4
+	}
+	[ -n "$last" ] && printf '%s\n' "$last" | jq . || echo "LAST RUN: none on record in ${LOOKBACK}."
+}
+
+cmd_retire() {
+	local run
+	run="$(date +%s)-${RANDOM}"
+	deliver "$(jq -cn --arg app "$APP" --arg loop "$SLUG" --arg run "$run" --arg time "$(now)" \
+		'{app:$app, loop:$loop, event:"retire", run:$run, _time:$time, summary:"retired"}')" "$run" retire || return 3
+	echo "${SLUG} retired: its stale alert stops."
+}
+
+[ $# -ge 2 ] || usage
+CMD="$1" SLUG="$2"
+shift 2
+[[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] || die "slug must be lowercase letters, digits and hyphens"
+[ -n "${LOOPS_VLOGS_URL:-}" ] || die "LOOPS_VLOGS_URL is not set"
+[[ "$LOOPS_VLOGS_URL" == https://* ]] || die "LOOPS_VLOGS_URL must start with https://"
+mkdir -p "$STATE_DIR" || die "cannot create ${STATE_DIR}"
+
+case "$CMD" in
+start) cmd_start "$@" ;;
+finish) cmd_finish "$@" ;;
+last) cmd_last ;;
+retire) cmd_retire ;;
+*) usage ;;
+esac

@@ -187,3 +187,9 @@ EOF2
 	run "$LOOP" start demo --every 1h --sources a
 	[ "$status" -eq 2 ]
 }
+
+@test "a start left by another session cannot make a finish succeed" {
+	CLAUDE_CODE_REMOTE_SESSION_ID=one "$LOOP" start demo --every 1h --sources a
+	CLAUDE_CODE_REMOTE_SESSION_ID=two run "$LOOP" finish demo --outcome nothing --covered a --summary q
+	[ "$(last_insert | jq -r .outcome)" = "partial" ]
+}

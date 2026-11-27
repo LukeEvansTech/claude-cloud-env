@@ -20,7 +20,6 @@ set -uo pipefail
 
 APP="${LOOPS_APP:-loops}"
 PROXY="${LOOPS_PROXY-socks5://127.0.0.1:1055}"
-# Local to the sandbox, which one run owns; runs never share it.
 STATE_DIR="${LOOPS_STATE_DIR:-${TMPDIR:-/tmp}/loops}"
 HOOK="${LOOPS_SESSION_HOOK:-/opt/claude-cloud-env/session-start.sh}"
 STATE_MAX_BYTES=4096
@@ -155,7 +154,8 @@ cmd_start() {
 	started_epoch="$(date +%s)"
 	run="${started_epoch}-${RANDOM}"
 	jq -n --arg run "$run" --arg t "$started_epoch" --arg s "$sources" --arg m "$max_age_s" \
-		'{run:$run, started:$t, sources:$s, max_age_s:$m}' >"${STATE_DIR}/${SLUG}.json" ||
+		--arg session "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
+		'{run:$run, started:$t, sources:$s, max_age_s:$m, session:$session}' >"${STATE_DIR}/${SLUG}.json" ||
 		die "start: cannot save run state in ${STATE_DIR}"
 
 	local last rc=0
@@ -210,7 +210,8 @@ cmd_finish() {
 
 	local note='' run started sources max_age_s
 	local sf="${STATE_DIR}/${SLUG}.json"
-	if [ -s "$sf" ]; then
+	# Sandboxes are reused: a start file from another session is not this run's.
+	if [ -s "$sf" ] && [ "$(jq -r '.session // ""' "$sf")" = "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ]; then
 		run="$(jq -r .run "$sf")" started="$(jq -r .started "$sf")"
 		sources="$(jq -r .sources "$sf")" max_age_s="$(jq -r .max_age_s "$sf")"
 	else

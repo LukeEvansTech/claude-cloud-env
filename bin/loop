@@ -109,9 +109,10 @@ deliver() {
 	return 3
 }
 
+# $1: an extra filter, such as "state:*" for the newest finish that saved state.
 last_finish() {
 	local out
-	out="$(query "_time:${LOOKBACK} {app=\"${APP}\",loop=\"${SLUG}\"} event:=\"finish\" | sort by (_time desc) | limit 1")" || return 1
+	out="$(query "_time:${LOOKBACK} {app=\"${APP}\",loop=\"${SLUG}\"} event:=\"finish\" ${1:-} | sort by (_time desc) | limit 1")" || return 1
 	[ -z "$out" ] || printf '%s' "$out" | jq -e '.event == "finish"' >/dev/null 2>&1 || return 1
 	printf '%s' "$out"
 }
@@ -158,11 +159,15 @@ cmd_start() {
 		'{run:$run, started:$t, sources:$s, max_age_s:$m, session:$session}' >"${STATE_DIR}/${SLUG}.json" ||
 		die "start: cannot save run state in ${STATE_DIR}"
 
-	local last rc=0
-	if last="$(last_finish)"; then
+	# State comes from the newest finish that saved one: a later run that
+	# failed before it could read its memory must not erase it.
+	local last saved rc=0
+	if last="$(last_finish)" && saved="$(last_finish 'state:*')"; then
 		if [ -n "$last" ]; then
 			echo "LAST RUN:"
-			printf '%s\n' "$last" | jq '{_time, outcome, summary: ._msg, covered, blocked, needs_human, state: ((.state // "") as $s | if $s == "" then null else (try ($s | fromjson) catch $s) end)}'
+			jq -n --argjson last "$last" --argjson saved "${saved:-null}" '$last | {_time, outcome, summary: ._msg, covered, blocked, needs_human}
+				+ {state: (($saved.state // "") as $s | if $s == "" then null else (try ($s | fromjson) catch $s) end),
+				   state_saved_at: ($saved._time // null)}'
 		else
 			echo "LAST RUN: none on record in ${LOOKBACK}."
 		fi

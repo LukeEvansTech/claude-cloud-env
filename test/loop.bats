@@ -121,3 +121,23 @@ last_insert() { tail -n 1 "$FAKE_INSERTS"; }
 	[ "$status" -eq 0 ]
 	[ "$(last_insert | jq -r .event)" = "retire" ]
 }
+
+@test "a flag with no value exits 2 instead of hanging" {
+	run timeout 5 "$LOOP" start demo --every
+	[ "$status" -eq 2 ]
+	run timeout 5 "$LOOP" finish demo --outcome nothing --summary
+	[ "$status" -eq 2 ]
+}
+
+@test "the gateway pin uses the URL's own port" {
+	cat >"$BATS_TEST_TMPDIR/bin/curl" <<'EOF2'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKE_ARGS"
+printf '\n200'
+EOF2
+	export FAKE_ARGS="$BATS_TEST_TMPDIR/args"
+	LOOPS_VLOGS_URL="https://logs.example.test:9443" LOOPS_GATEWAY=192.0.2.7 run "$LOOP" last demo
+	grep -q -- '--resolve logs.example.test:9443:192.0.2.7' "$FAKE_ARGS"
+	LOOPS_GATEWAY=192.0.2.7 run "$LOOP" last demo
+	grep -q -- '--resolve logs.example.test:443:192.0.2.7' "$FAKE_ARGS"
+}

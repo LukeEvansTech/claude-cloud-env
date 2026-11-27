@@ -29,6 +29,9 @@ die() {
 	exit 2
 }
 
+# A flag given without its value must stop the run, not spin the parser.
+need() { [ $# -ge 2 ] || die "$1 needs a value"; }
+
 usage() {
 	sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
 	exit 2
@@ -59,14 +62,15 @@ blocked_names() {
 }
 
 home_curl() {
-	local host="${LOOPS_VLOGS_URL#https://}"
+	local host="${LOOPS_VLOGS_URL#https://}" port=443
 	host="${host%%/*}"
-	local args=(-sS --connect-timeout 10 --max-time 30)
-	[ -n "$PROXY" ] && args+=(--proxy "$PROXY")
-	[ -n "${LOOPS_GATEWAY:-}" ] && args+=(--resolve "${host}:443:${LOOPS_GATEWAY}")
+	case "$host" in *:*) port="${host##*:}" host="${host%:*}" ;; esac
+	local args=(-sS --connect-timeout 10 --max-time 30 --proxy "$PROXY")
+	[ -n "${LOOPS_GATEWAY:-}" ] && args+=(--resolve "${host}:${port}:${LOOPS_GATEWAY}")
 	# The sandbox presets proxy variables whose no_proxy covers 10/8; with
 	# them set curl dials a routed address direct and is refused.
 	no_proxy='' NO_PROXY='' http_proxy='' https_proxy='' HTTP_PROXY='' HTTPS_PROXY='' \
+		all_proxy='' ALL_PROXY='' \
 		curl "${args[@]}" "$@"
 }
 
@@ -120,9 +124,9 @@ cmd_start() {
 	local every='' max_age='' sources=''
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--every) every="${2-}" && shift 2 ;;
-		--max-age) max_age="${2-}" && shift 2 ;;
-		--sources) sources="${2-}" && shift 2 ;;
+		--every) need "$@" && every="$2" && shift 2 ;;
+		--max-age) need "$@" && max_age="$2" && shift 2 ;;
+		--sources) need "$@" && sources="$2" && shift 2 ;;
 		*) die "start: unknown argument $1" ;;
 		esac
 	done
@@ -171,12 +175,12 @@ cmd_finish() {
 	local outcome='' covered='' blocked='' summary='' needs='' state_file=''
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--outcome) outcome="${2-}" && shift 2 ;;
-		--covered) covered="${2-}" && shift 2 ;;
-		--blocked) blocked="${2-}" && shift 2 ;;
-		--summary) summary="${2-}" && shift 2 ;;
-		--needs-human) needs="${2-}" && shift 2 ;;
-		--state) state_file="${2-}" && shift 2 ;;
+		--outcome) need "$@" && outcome="$2" && shift 2 ;;
+		--covered) need "$@" && covered="$2" && shift 2 ;;
+		--blocked) need "$@" && blocked="$2" && shift 2 ;;
+		--summary) need "$@" && summary="$2" && shift 2 ;;
+		--needs-human) need "$@" && needs="$2" && shift 2 ;;
+		--state) need "$@" && state_file="$2" && shift 2 ;;
 		*) die "finish: unknown argument $1" ;;
 		esac
 	done

@@ -13,6 +13,11 @@ case "$*" in
 	cat >>"$FAKE_INSERTS"
 	printf '%s' "${FAKE_INSERT_CODE:-200}"
 	;;
+*/select/logsql/query*run:=*)
+	# The read-back of a record just written: answer with that record.
+	if [ -n "${FAKE_READBACK:-}" ]; then printf '%s' "$FAKE_READBACK"; elif [ -s "$FAKE_QUERY" ]; then tail -n 1 "$FAKE_INSERTS"; fi
+	printf '\n%s' "${FAKE_QUERY_CODE:-200}"
+	;;
 */select/logsql/query*)
 	cat "$FAKE_QUERY"
 	printf '\n%s' "${FAKE_QUERY_CODE:-200}"
@@ -24,8 +29,8 @@ EOF
 	export FAKE_INSERTS="$BATS_TEST_TMPDIR/inserts.jsonl" FAKE_QUERY="$BATS_TEST_TMPDIR/query.out"
 	export LOOPS_VLOGS_URL="https://logs.example.test" LOOPS_PROXY="" LOOPS_RETRY_SLEEP=0
 	export LOOPS_STATE_DIR="$BATS_TEST_TMPDIR/state"
-	unset CLAUDE_CODE_REMOTE FAKE_CURL_FAIL FAKE_INSERT_CODE FAKE_QUERY_CODE
-	echo '{"_time":"2026-01-01T00:00:00Z","outcome":"nothing","_msg":"prev","state":"{\"n\":1}"}' >"$FAKE_QUERY"
+	unset CLAUDE_CODE_REMOTE FAKE_CURL_FAIL FAKE_INSERT_CODE FAKE_QUERY_CODE FAKE_READBACK
+	echo '{"_time":"2026-01-01T00:00:00Z","event":"finish","outcome":"nothing","_msg":"prev","state":"{\"n\":1}"}' >"$FAKE_QUERY"
 }
 
 last_insert() { tail -n 1 "$FAKE_INSERTS"; }
@@ -140,4 +145,25 @@ EOF2
 	grep -q -- '--resolve logs.example.test:9443:192.0.2.7' "$FAKE_ARGS"
 	LOOPS_GATEWAY=192.0.2.7 run "$LOOP" last demo
 	grep -q -- '--resolve logs.example.test:443:192.0.2.7' "$FAKE_ARGS"
+}
+
+@test "a 200 that is not the record does not confirm delivery" {
+	"$LOOP" start demo --every 1h --sources a
+	FAKE_READBACK='<html>Sign in</html>' run "$LOOP" finish demo --outcome nothing --covered a --summary q
+	[ "$status" -eq 3 ]
+	FAKE_READBACK='{"run":"other","event":"finish"}' run "$LOOP" finish demo --outcome nothing --covered a --summary q
+	[ "$status" -eq 3 ]
+}
+
+@test "a last-run lookup that returns a non-record is unknown" {
+	echo '<html>Sign in</html>' >"$FAKE_QUERY"
+	run "$LOOP" last demo
+	[ "$status" -eq 4 ]
+}
+
+@test "malformed durations are refused" {
+	run "$LOOP" start demo --every 1h --max-age 1h30s --sources a
+	[ "$status" -eq 2 ]
+	run "$LOOP" start demo --every h --sources a
+	[ "$status" -eq 2 ]
 }

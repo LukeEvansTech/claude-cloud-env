@@ -314,7 +314,10 @@ if command -v tailscaled >/dev/null 2>&1; then
 		# The OAuth client decides which tag it may mint; an environment with a
 		# narrower client names its tag in CCENV_TS_TAG.
 		TS_TAG="${CCENV_TS_TAG:-tag:claude-cloud}"
-		[[ "$TS_TAG" =~ ^tag:[a-z0-9-]+$ ]] || TS_TAG="tag:claude-cloud"
+		if ! [[ "$TS_TAG" =~ ^tag:[A-Za-z][A-Za-z0-9-]*$ ]]; then
+			log "Tailnet: CCENV_TS_TAG is not a valid tag; using tag:claude-cloud."
+			TS_TAG="tag:claude-cloud"
+		fi
 		if no_proxy='' NO_PROXY='' tailscale up \
 			--auth-key="${TS_OAUTH_CLIENT_SECRET}?ephemeral=true&preauthorized=true" \
 			--advertise-tags="$TS_TAG" \
